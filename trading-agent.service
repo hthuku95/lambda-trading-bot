@@ -1,0 +1,28 @@
+[Unit]
+Description=Solana Trading Agent Daemon
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=harry
+Group=harry
+WorkingDirectory=/home/harry/projects/DevThukuDotIO/SnowballResearch/lambda-trading-bot
+Environment="PATH=/home/harry/projects/DevThukuDotIO/SnowballResearch/lambda-trading-bot/env/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/home/harry/projects/DevThukuDotIO/SnowballResearch/lambda-trading-bot/env/bin/python /home/harry/projects/DevThukuDotIO/SnowballResearch/lambda-trading-bot/agent_daemon.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/home/harry/projects/DevThukuDotIO/SnowballResearch/lambda-trading-bot/agent_daemon.log
+StandardError=append:/home/harry/projects/DevThukuDotIO/SnowballResearch/lambda-trading-bot/agent_daemon.log
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Graceful shutdown
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

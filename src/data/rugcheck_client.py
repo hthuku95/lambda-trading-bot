@@ -66,31 +66,22 @@ class RugCheckClient:
         self.last_request_time = time.time()
     
     def check_api_health(self) -> Dict[str, Any]:
-        """Check RugCheck API health using working endpoints"""
+        """Check RugCheck API health using the official /ping endpoint"""
         try:
             start_time = datetime.now()
-            
-            # Test with a working stats endpoint first
-            response = self.session.get(f"{self.base_url}/stats/new_tokens", timeout=10)
-            
+            response = self.session.get(f"{self.base_url}/ping", timeout=10)
+            response_time = (datetime.now() - start_time).total_seconds() * 1000
+
             if response.status_code == 200:
-                response_time = (datetime.now() - start_time).total_seconds() * 1000
-                
-                # Test token lookup capability with USDC
-                test_token = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-                token_test = self.session.get(f"{self.base_url}/tokens/{test_token}/report", timeout=10)
-                
                 return {
                     "healthy": True,
                     "working_endpoint": self.base_url,
                     "working_pattern": "/tokens/{token}/report",
                     "response_time_ms": response_time,
                     "solana_available": True,
-                    "token_lookup_working": token_test.status_code == 200,
-                    "auth_working": False,  # No auth required for basic reports
+                    "auth_working": bool(self.auth_token),
                     "wallet_configured": bool(self.private_key),
-                    "authentication_method": "none_required",
-                    "endpoints_tested": 2,
+                    "authentication_method": "solana_jwt" if self.auth_token else "none",
                     "base_url": self.base_url,
                     "timestamp": datetime.now().isoformat()
                 }
@@ -100,13 +91,143 @@ class RugCheckClient:
                     "error": f"API returned status {response.status_code}",
                     "timestamp": datetime.now().isoformat()
                 }
-                
+
         except Exception as e:
             return {
                 "healthy": False,
                 "error": str(e),
                 "timestamp": datetime.now().isoformat()
             }
+
+    def authenticate(self) -> bool:
+        """Authenticate with RugCheck using Solana wallet signature (unlocks bulk endpoints)."""
+        if not self.private_key:
+            logger.warning("No SOLANA_PRIVATE_KEY — RugCheck bulk endpoints unavailable")
+            return False
+        if self.auth_token and self.auth_expires and datetime.now() < self.auth_expires:
+            return True  # Reuse existing valid token
+
+        try:
+            import nacl.signing
+            import base58
+
+            # Get the message to sign
+            msg_resp = self.session.get(f"{self.base_url}/auth/login/solana", timeout=10)
+            if msg_resp.status_code != 200:
+                logger.error(f"RugCheck auth message fetch failed: {msg_resp.status_code}")
+                return False
+
+            message = msg_resp.json().get("message", "")
+            if not message:
+                logger.error("RugCheck returned empty auth message")
+                return False
+
+            # Sign with Solana private key
+            key_bytes = base58.b58decode(self.private_key)
+            signing_key = nacl.signing.SigningKey(key_bytes[:32])
+            signed = signing_key.sign(message.encode())
+            signature_b58 = base58.b58encode(signed.signature).decode()
+            verify_key_b58 = base58.b58encode(bytes(signing_key.verify_key)).decode()
+
+            # Submit signature
+            auth_resp = self.session.post(
+                f"{self.base_url}/auth/login/solana",
+                json={"message": message, "signature": signature_b58, "wallet": verify_key_b58},
+                timeout=10
+            )
+            if auth_resp.status_code == 200:
+                token = auth_resp.json().get("token", "")
+                if token:
+                    self.auth_token = token
+                    self.auth_expires = datetime.now() + timedelta(hours=1)
+                    self.session.headers.update({"Authorization": f"Bearer {token}"})
+                    logger.info("RugCheck authentication successful — bulk endpoints unlocked")
+                    return True
+
+            logger.error(f"RugCheck auth failed: {auth_resp.status_code} {auth_resp.text[:200]}")
+            return False
+
+        except Exception as e:
+            logger.error(f"RugCheck authentication error: {e}")
+            return False
+
+    def get_bulk_token_reports(self, token_addresses: List[str]) -> Dict[str, Any]:
+        """Batch fetch safety reports for up to 30 tokens in a single request (requires auth)."""
+        if not self.authenticate():
+            logger.warning("RugCheck bulk endpoint unavailable — falling back to individual requests")
+            results = {}
+            for addr in token_addresses:
+                results[addr] = self.get_token_safety_data_raw(addr)
+            return results
+
+        try:
+            self._rate_limit_delay()
+            response = self.session.post(
+                f"{self.base_url}/bulk/tokens/report",
+                json={"mints": token_addresses[:30]},
+                timeout=30
+            )
+            if response.status_code == 200:
+                logger.info(f"Bulk RugCheck report fetched for {len(token_addresses)} tokens")
+                return {"bulk_reports": response.json(), "data_available": True}
+            else:
+                logger.error(f"Bulk RugCheck report failed: {response.status_code}")
+                return {"bulk_reports": {}, "data_available": False, "error": response.status_code}
+        except Exception as e:
+            logger.error(f"Bulk RugCheck report error: {e}")
+            return {"bulk_reports": {}, "data_available": False, "error": str(e)}
+
+    def get_insider_graph(self, token_address: str) -> Dict[str, Any]:
+        """Get insider wallet network graph — detect serial rug pullers."""
+        try:
+            self._rate_limit_delay()
+            response = self.session.get(
+                f"{self.base_url}/tokens/{token_address}/insiders/graph", timeout=15
+            )
+            if response.status_code == 200:
+                return {"insider_graph": response.json(), "data_available": True}
+            else:
+                return {"insider_graph": {}, "data_available": False, "status_code": response.status_code}
+        except Exception as e:
+            return {"insider_graph": {}, "data_available": False, "error": str(e)}
+
+    def get_community_votes(self, token_address: str) -> Dict[str, Any]:
+        """Get community voting sentiment — crowd wisdom on token legitimacy."""
+        try:
+            self._rate_limit_delay()
+            response = self.session.get(
+                f"{self.base_url}/tokens/{token_address}/votes", timeout=15
+            )
+            if response.status_code == 200:
+                return {"votes": response.json(), "data_available": True}
+            else:
+                return {"votes": {}, "data_available": False, "status_code": response.status_code}
+        except Exception as e:
+            return {"votes": {}, "data_available": False, "error": str(e)}
+
+    def get_most_viewed_tokens(self) -> Dict[str, Any]:
+        """Get most-viewed tokens in 24h — alternative discovery source."""
+        try:
+            self._rate_limit_delay()
+            response = self.session.get(f"{self.base_url}/stats/recent", timeout=10)
+            if response.status_code == 200:
+                return {"tokens": response.json(), "data_available": True}
+            else:
+                return {"tokens": [], "data_available": False, "error": response.status_code}
+        except Exception as e:
+            return {"tokens": [], "data_available": False, "error": str(e)}
+
+    def get_verified_tokens(self) -> Dict[str, Any]:
+        """Get pre-screened safe tokens — discovery for conservative strategies."""
+        try:
+            self._rate_limit_delay()
+            response = self.session.get(f"{self.base_url}/stats/verified", timeout=10)
+            if response.status_code == 200:
+                return {"tokens": response.json(), "data_available": True}
+            else:
+                return {"tokens": [], "data_available": False, "error": response.status_code}
+        except Exception as e:
+            return {"tokens": [], "data_available": False, "error": str(e)}
     
     def _extract_score_metrics(self, score: int) -> Dict[str, Any]:
         """Extract pure score metrics - NO JUDGMENT, just data"""
@@ -357,6 +478,7 @@ class RugCheckClient:
                         "lockers": raw_api_response.get('lockers', {}),
                         "insider_networks": raw_api_response.get('insiderNetworks', [])
                     },
+                    "events_raw": raw_api_response.get('events', []),  # Timeline of token events
                     
                     # Enhanced data extraction fields (PURE DATA - NO JUDGMENT)
                     "price": raw_api_response.get('price', 0),
@@ -632,6 +754,26 @@ def get_trending_tokens() -> Dict[str, Any]:
     """Get trending tokens"""
     return rugcheck_client.get_trending_tokens()
 
+def get_bulk_token_reports(token_addresses: List[str]) -> Dict[str, Any]:
+    """Batch fetch safety reports for up to 30 tokens (requires auth)"""
+    return rugcheck_client.get_bulk_token_reports(token_addresses)
+
+def get_insider_graph(token_address: str) -> Dict[str, Any]:
+    """Get insider wallet network graph for a token"""
+    return rugcheck_client.get_insider_graph(token_address)
+
+def get_community_votes(token_address: str) -> Dict[str, Any]:
+    """Get community voting sentiment for a token"""
+    return rugcheck_client.get_community_votes(token_address)
+
+def get_most_viewed_tokens() -> Dict[str, Any]:
+    """Get most-viewed tokens in 24h from RugCheck"""
+    return rugcheck_client.get_most_viewed_tokens()
+
+def get_verified_tokens() -> Dict[str, Any]:
+    """Get pre-screened safe tokens from RugCheck"""
+    return rugcheck_client.get_verified_tokens()
+
 # ============================================================================
 # LEGACY COMPATIBILITY FUNCTIONS
 # ============================================================================
@@ -707,12 +849,12 @@ def get_ai_safety_analysis(token_address: str) -> Dict[str, Any]:
     Only call this if you want AI judgments - otherwise use get_token_safety_data_raw()
     """
     try:
-        # Import here to avoid circular dependencies
-        from src.agent.pure_ai_agent import EnhancedPureAITradingAgent
-        
+        import anthropic as _anthropic
+        import os as _os
+
         # Get raw data first
         raw_data = get_token_safety_data_raw(token_address)
-        
+
         if not raw_data.get("data_available"):
             return {
                 "token_address": token_address,
@@ -720,17 +862,18 @@ def get_ai_safety_analysis(token_address: str) -> Dict[str, Any]:
                 "error": "No raw data available for AI analysis",
                 "raw_data": raw_data
             }
-        
-        # Initialize AI agent
-        agent = EnhancedPureAITradingAgent()
-        
-        if not agent.client:
+
+        api_key = _os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
             return {
                 "token_address": token_address,
                 "ai_analysis_available": False,
                 "error": "AI agent not available",
                 "raw_data": raw_data
             }
+
+        client = _anthropic.Anthropic(api_key=api_key)
+        model = "claude-haiku-4-5-20251001"
         
         # Create analysis prompt
         analysis_prompt = f"""
@@ -756,8 +899,8 @@ def get_ai_safety_analysis(token_address: str) -> Dict[str, Any]:
         """
         
         # Get AI analysis
-        response = agent.client.messages.create(
-            model=agent.model,
+        response = client.messages.create(
+            model=model,
             max_tokens=1000,
             messages=[{"role": "user", "content": analysis_prompt}]
         )

@@ -4,8 +4,14 @@ Modern State Management - Pure AI Trading Agent
 ZERO BitQuery dependencies - Full compatibility with RugCheck + TweetScout + DexScreener
 AI-driven analysis and judgment system
 """
+import os
 from typing import List, Dict, Any, TypedDict, Optional
 from datetime import datetime
+from .file_lock import get_state_lock
+
+# Resolve project root once at module load — all state files use absolute paths
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_DEFAULT_STATE_FILE = os.path.join(_PROJECT_ROOT, "agent_state.json")
 
 class TokenData(TypedDict):
     """Modern token data structure - pure data collection + AI analysis"""
@@ -209,6 +215,7 @@ class AgentState(TypedDict):
     # ============================================================================
     wallet_balance_sol: float      # Current SOL balance
     wallet_balance_usd: float      # Current USD equivalent balance
+    simulated_balance_sol: float   # Virtual balance for dry-run/sandbox — separate from real wallet
     active_positions: List[Position]       # Currently held positions
     total_portfolio_value_sol: float       # Total portfolio value in SOL
     total_portfolio_value_usd: float       # Total portfolio value in USD
@@ -339,6 +346,7 @@ def create_initial_state() -> AgentState:
         # Portfolio state
         wallet_balance_sol=wallet_balance,
         wallet_balance_usd=0.0,  # Will be calculated
+        simulated_balance_sol=float(os.getenv("SANDBOX_INITIAL_BALANCE_SOL", "10.0")),
         active_positions=[],
         total_portfolio_value_sol=wallet_balance,
         total_portfolio_value_usd=0.0,
@@ -455,25 +463,40 @@ def create_initial_state() -> AgentState:
     )
 
 def update_portfolio_metrics(state: AgentState) -> AgentState:
-    """Update portfolio performance metrics"""
+    """Update portfolio performance metrics including Sharpe ratio and max drawdown."""
+    import math
     try:
+        # Fetch live SOL/USD price (cached 60s)
+        try:
+            from src.data.sol_price import sol_to_usd, get_sol_price_usd
+            sol_price = get_sol_price_usd() or 0.0
+        except Exception:
+            sol_price = 0.0
         # Calculate current portfolio value
         active_positions = state.get("active_positions", [])
         wallet_balance = state.get("wallet_balance_sol", 0)
-        
+
         total_position_value = sum(pos.get("current_value_sol", 0) for pos in active_positions)
         total_portfolio_value = wallet_balance + total_position_value
-        
+
         # Calculate unrealized P&L
         unrealized_pnl = sum(pos.get("unrealized_pnl_sol", 0) for pos in active_positions)
-        
+
         # Update state
         state["total_portfolio_value_sol"] = total_portfolio_value
         state["portfolio_metrics"]["total_value_sol"] = total_portfolio_value
         state["portfolio_metrics"]["unrealized_profit_sol"] = unrealized_pnl
         state["portfolio_metrics"]["last_updated"] = datetime.now().isoformat()
-        
-        # Calculate win rate
+
+        # USD values — only set when we have a live price
+        if sol_price > 0:
+            state["wallet_balance_usd"] = state.get("wallet_balance_sol", 0) * sol_price
+            state["total_portfolio_value_usd"] = total_portfolio_value * sol_price
+            total_profit_sol = state.get("total_profit_sol", 0.0)
+            state["total_profit_usd"] = total_profit_sol * sol_price
+            state["portfolio_metrics"]["sol_price_usd"] = sol_price
+
+        # Calculate win rate and per-trade returns
         transaction_history = state.get("transaction_history", [])
         completed_trades = [tx for tx in transaction_history if tx.get("type") in ["sell", "partial_sell"]]
         if completed_trades:
@@ -481,92 +504,134 @@ def update_portfolio_metrics(state: AgentState) -> AgentState:
             win_rate = len(profitable_trades) / len(completed_trades)
             state["win_rate"] = win_rate
             state["portfolio_metrics"]["win_rate"] = win_rate
-        
+
+            # --- Sharpe Ratio (annualised, assuming 5-min cycles → 105,120 cycles/year) ---
+            returns = [tx.get("profit_percentage", 0) / 100.0 for tx in completed_trades]
+            if len(returns) >= 2:
+                n = len(returns)
+                mean_r = sum(returns) / n
+                variance = sum((r - mean_r) ** 2 for r in returns) / (n - 1)
+                std_r = math.sqrt(variance) if variance > 0 else 0.0
+                # Annualise: ~105,120 cycles/year (5-min intervals)
+                annualisation = math.sqrt(105120)
+                sharpe = (mean_r / std_r) * annualisation if std_r > 0 else 0.0
+                state["sharpe_ratio"] = round(sharpe, 4)
+                state["portfolio_metrics"]["sharpe_ratio"] = round(sharpe, 4)
+
+            # --- Max Drawdown (peak-to-trough on cumulative balance snapshots) ---
+            balance_snapshots = state.get("portfolio_metrics", {}).get("balance_history", [])
+            if balance_snapshots and len(balance_snapshots) >= 2:
+                peak = balance_snapshots[0]
+                max_dd = 0.0
+                for val in balance_snapshots:
+                    if val > peak:
+                        peak = val
+                    dd = (peak - val) / peak if peak > 0 else 0.0
+                    if dd > max_dd:
+                        max_dd = dd
+                state["max_drawdown"] = round(max_dd, 6)
+                state["portfolio_metrics"]["max_drawdown"] = round(max_dd, 6)
+
+        # Append current portfolio value to balance history (capped at 500 entries)
+        history = state.get("portfolio_metrics", {}).get("balance_history", [])
+        history.append(total_portfolio_value)
+        if len(history) > 500:
+            history = history[-500:]
+        state["portfolio_metrics"]["balance_history"] = history
+
         return state
-        
+
     except Exception as e:
         import logging
         logger = logging.getLogger("trading_agent.state")
         logger.error(f"Error updating portfolio metrics: {e}")
         return state
 
-def save_agent_state(state: AgentState, filename: str = "agent_state.json") -> bool:
-    """Save the modern agent state to disk"""
+def save_agent_state(state: AgentState, filename: str = None) -> bool:
+    """Save the modern agent state to disk in a thread-safe, atomic manner."""
     import json
     import logging
-    
-    logger = logging.getLogger("trading_agent.state")
-    
-    try:
-        # Update metrics before saving
-        state = update_portfolio_metrics(state)
-        
-        # Convert state to serializable dict
-        serializable_state = {
-            # Core portfolio data
-            "wallet_balance_sol": state.get("wallet_balance_sol", 0),
-            "active_positions": state.get("active_positions", []),
-            "transaction_history": state.get("transaction_history", []),
-            
-            # Analysis data
-            "analyzed_tokens": state.get("analyzed_tokens", []),
-            "validated_tokens": state.get("validated_tokens", []),
-            "market_conditions": state.get("market_conditions", {}),
-            
-            # AI state
-            "agent_reasoning": state.get("agent_reasoning", ""),
-            "ai_strategy": state.get("ai_strategy", ""),
-            "ai_learned_patterns": state.get("ai_learned_patterns", []),
-            
-            # Configuration
-            "agent_parameters": state.get("agent_parameters", {}),
-            "risk_management": state.get("risk_management", {}),
-            
-            # Performance
-            "portfolio_metrics": state.get("portfolio_metrics", {}),
-            "trading_performance": state.get("trading_performance", {}),
-            
-            # System state
-            "last_update_timestamp": datetime.now().isoformat(),
-            "cycles_completed": state.get("cycles_completed", 0),
-            
-            # Legacy compatibility
-            "market_conditions": state.get("market_conditions", {}),  # For UI compatibility
-        }
-        
-        # Save to file
-        with open(filename, "w") as f:
-            json.dump(serializable_state, f, indent=2)
-            
-        logger.info(f"Agent state saved successfully to {filename}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error saving agent state: {e}")
-        return False
 
-def load_agent_state(filename: str = "agent_state.json") -> Optional[AgentState]:
-    """Load the modern agent state from disk"""
-    import json
-    import os
-    import logging
-    
+    if filename is None:
+        filename = _DEFAULT_STATE_FILE
+
     logger = logging.getLogger("trading_agent.state")
-    
-    try:
-        if os.path.exists(filename):
-            with open(filename, "r") as f:
-                data = json.load(f)
+
+    with get_state_lock():
+        try:
+            # Update metrics before saving
+            state = update_portfolio_metrics(state)
+
+            # Convert state to serializable dict
+            serializable_state = {
+                # Core portfolio data
+                "wallet_balance_sol": state.get("wallet_balance_sol", 0),
+                "simulated_balance_sol": state.get("simulated_balance_sol", 10.0),
+                "active_positions": state.get("active_positions", []),
+                "transaction_history": state.get("transaction_history", []),
+                
+                # Analysis data
+                "analyzed_tokens": state.get("analyzed_tokens", []),
+                "validated_tokens": state.get("validated_tokens", []),
+                "market_conditions": state.get("market_conditions", {}),
+                
+                # AI state
+                "agent_reasoning": state.get("agent_reasoning", ""),
+                "ai_strategy": state.get("ai_strategy", ""),
+                "ai_learned_patterns": state.get("ai_learned_patterns", []),
+                
+                # Configuration
+                "agent_parameters": state.get("agent_parameters", {}),
+                "risk_management": state.get("risk_management", {}),
+                
+                # Performance
+                "portfolio_metrics": state.get("portfolio_metrics", {}),
+                "trading_performance": state.get("trading_performance", {}),
+                
+                # System state
+                "last_update_timestamp": datetime.now().isoformat(),
+                "cycles_completed": state.get("cycles_completed", 0),
+                
+            }
             
-            logger.info(f"Agent state loaded from {filename}")
-            return data
-        else:
-            logger.info(f"No saved state found at {filename}, will create new state")
+            # Atomic write: write to tmp then rename to prevent corruption on crash
+            tmp_filename = filename + ".tmp"
+            with open(tmp_filename, "w") as f:
+                json.dump(serializable_state, f, indent=2)
+            os.replace(tmp_filename, filename)
+
+            logger.info(f"Agent state saved successfully to {filename}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error saving agent state: {e}")
+            return False
+
+def load_agent_state(filename: str = None) -> Optional[AgentState]:
+    """Load the modern agent state from disk in a thread-safe manner."""
+    import json
+    import logging
+
+    if filename is None:
+        filename = _DEFAULT_STATE_FILE
+
+    logger = logging.getLogger("trading_agent.state")
+
+    with get_state_lock():
+        try:
+            if os.path.exists(filename):
+                with open(filename, "r") as f:
+                    data = json.load(f)
+                
+                logger.info(f"Agent state loaded from {filename}")
+                return data
+            else:
+                logger.info(f"No saved state found at {filename}, will create new state")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error loading agent state: {e}")
             return None
-            
-    except Exception as e:
-        logger.error(f"Error loading agent state: {e}")
-        return None
 
 def migrate_legacy_state(legacy_state: Dict[str, Any]) -> AgentState:
     """
@@ -624,10 +689,9 @@ def migrate_legacy_state(legacy_state: Dict[str, Any]) -> AgentState:
                     "reason": pos.get("reason", "Legacy position"),
                     "strategy": "legacy",
                     "risk_level": "medium",
-                    "enriched": pos.get("bitquery_enriched", False),
+                    "enriched": False, # Mark as not enriched with modern data
                     "last_update_timestamp": datetime.now().isoformat(),
                     "data_sources_used": {"legacy": True},
-                    "bitquery_enriched": False,  # Always False now
                     
                     # Initialize other required fields
                     "entry_safety_score": 0,
@@ -647,6 +711,8 @@ def migrate_legacy_state(legacy_state: Dict[str, Any]) -> AgentState:
                     "profit_target_hit": False,
                     "stop_loss_triggered": False
                 }
+                # Remove legacy BitQuery field from original position if present
+                pos.pop("bitquery_enriched", None)
                 migrated_positions.append(migrated_pos)
             
             new_state["active_positions"] = migrated_positions
@@ -683,14 +749,22 @@ def validate_state_structure(state: AgentState) -> bool:
 
 def get_state_summary(state: AgentState) -> Dict[str, Any]:
     """Get a summary of current state for logging/debugging"""
+    # Calculate total portfolio value from wallet balance + active positions
+    wallet_balance = state.get("wallet_balance_sol", 0)
+    active_positions = state.get("active_positions", [])
+    total_position_value = sum(pos.get("current_value_sol", 0) for pos in active_positions)
+    total_portfolio_value = wallet_balance + total_position_value
+
     return {
-        "wallet_balance_sol": state.get("wallet_balance_sol", 0),
-        "active_positions_count": len(state.get("active_positions", [])),
-        "total_portfolio_value": state.get("total_portfolio_value_sol", 0),
+        "wallet_balance_sol": wallet_balance,
+        "active_positions_count": len(active_positions),
+        "total_portfolio_value": total_portfolio_value,
         "ai_strategy": state.get("ai_strategy", "unknown"),
         "cycles_completed": state.get("cycles_completed", 0),
         "win_rate": state.get("win_rate", 0),
         "total_trades": state.get("total_trades", 0),
+        "successful_trades": sum(1 for tx in state.get("transaction_history", []) if tx.get("type") in ["sell", "partial_sell"] and tx.get("profit_percentage", 0) > 0),
         "last_updated": state.get("last_update_timestamp", ""),
-        "current_stage": state.get("current_cycle_stage", "unknown")
+        "current_stage": state.get("current_cycle_stage", "unknown"),
+        "performance_score": state.get("portfolio_metrics", {}).get("win_rate", 0) * 100
     }

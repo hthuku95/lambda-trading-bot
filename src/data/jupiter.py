@@ -34,6 +34,7 @@ def get_quote(output_mint, amount_in_sol=None, input_mint=None, amount=None, sli
         "outputMint": output_mint,
         "amount": amount,
         "slippageBps": slippage_bps,
+        "restrictIntermediateTokens": "true",  # Prevents routing through illiquid intermediates
     }
 
     try:
@@ -47,20 +48,22 @@ def get_quote(output_mint, amount_in_sol=None, input_mint=None, amount=None, sli
         input_amount = int(quote_data.get('inAmount', 0))
         output_amount = int(quote_data.get('outAmount', 0))
         
-        # Convert to human-readable format based on token
+        # Convert to human-readable format using actual decimals from the quote response
         if input_mint == SOL_MINT:
-            input_amount_human = input_amount / 1e9  # SOL has 9 decimals
+            input_decimals = 9
             input_token = "SOL"
         else:
-            input_amount_human = input_amount / 1e6  # Most SPL tokens have 6 decimals
+            input_decimals = int(quote_data.get('inputDecimals', 6))
             input_token = quote_data.get('inputSymbol', 'token')
-            
+        input_amount_human = input_amount / (10 ** input_decimals)
+
         if output_mint == SOL_MINT:
-            output_amount_human = output_amount / 1e9  # SOL has 9 decimals
+            output_decimals = 9
             output_token = "SOL"
         else:
-            output_amount_human = output_amount / 1e6  # Most SPL tokens have 6 decimals
+            output_decimals = int(quote_data.get('outputDecimals', 6))
             output_token = quote_data.get('outputSymbol', 'token')
+        output_amount_human = output_amount / (10 ** output_decimals)
         
         # Log the quote details
         logger.info(f"Quote received: {output_amount_human:.6f} {output_token} for " +
@@ -94,12 +97,13 @@ def get_swap_transaction(quote_response, user_pubkey):
     payload = {
         "quoteResponse": quote_response,
         "userPublicKey": str(user_pubkey),
-        "wrapUnwrapSOL": True,             # Auto-wrap/unwrap SOL
-        "computeUnitPriceMicroLamports": 50000,  # Priority fee
-        "asLegacyTransaction": False,      # Use versioned transactions
-        "skipUserAccountsCheck": True,     # Skip redundant checks
-        "maxAccounts": 64,                 # Allow more accounts (needed for complex swaps)
-        "createATA": True                  # Automatically create token accounts
+        "wrapUnwrapSOL": True,                   # Auto-wrap/unwrap SOL
+        "computeUnitPriceMicroLamports": "auto", # Auto priority fee (adjusts to network congestion)
+        "dynamicComputeUnitLimit": True,         # Optimize CU limit per transaction
+        "asLegacyTransaction": False,            # Use versioned transactions
+        "skipUserAccountsCheck": True,           # Skip redundant checks
+        "maxAccounts": 64,                       # Allow more accounts (needed for complex swaps)
+        "createATA": True                        # Automatically create token accounts
     }
 
     try:

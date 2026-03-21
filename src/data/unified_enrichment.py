@@ -237,52 +237,47 @@ class UnifiedTokenEnrichment:
     
     def _assess_data_quality(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """Assess the quality of collected raw data - NO SCORING, JUST ASSESSMENT"""
-        try:
-            quality_assessment = {
-                "overall_quality": "unknown",  # AI will determine
-                "data_completeness": {},
-                "data_freshness": {},
-                "source_reliability": {},
-                "coverage_analysis": {}
-            }
-            
-            # Check data completeness (not quality scoring)
-            dex_available = not bool(raw_data.get("dexscreener_raw", {}).get("error"))
-            rugcheck_available = not bool(raw_data.get("rugcheck_raw", {}).get("error"))
-            social_available = not bool(raw_data.get("tweetscout_raw", {}).get("error"))
-            
-            quality_assessment["data_completeness"] = {
-                "dexscreener_complete": dex_available,
-                "rugcheck_complete": rugcheck_available,
-                "social_complete": social_available,
-                "total_sources_available": sum([dex_available, rugcheck_available, social_available])
-            }
-            
-            # Check data freshness
-            current_time = datetime.now()
-            quality_assessment["data_freshness"] = {
-                "collection_timestamp": raw_data.get("data_collection_timestamp"),
-                "age_minutes": 0,  # Just collected
-                "is_fresh": True
-            }
-            
-            # Add quality assessment to raw data
-            raw_data["data_quality_assessment"] = quality_assessment
-            
-            # Add quality notes for AI
-            if not rugcheck_available:
-                raw_data["data_quality_notes"].append("RugCheck data unavailable - safety analysis limited")
-            if not social_available:
-                raw_data["data_quality_notes"].append("Social data unavailable - sentiment analysis limited")
-            if not dex_available:
-                raw_data["data_quality_notes"].append("DEX data unavailable - market analysis impossible")
-            
-            return raw_data
-            
-        except Exception as e:
-            logger.error(f"Error assessing data quality: {e}")
-            raw_data["data_quality_assessment"] = {"error": str(e)}
-            return raw_data
+        quality_assessment = {
+            "overall_quality": "unknown",  # AI will determine
+            "data_completeness": {},
+            "data_freshness": {},
+            "source_reliability": {},
+            "coverage_analysis": {}
+        }
+        
+        # Check data completeness (not quality scoring)
+        dex_available = not bool(raw_data.get("dexscreener_raw", {}).get("error"))
+        rugcheck_available = not bool(raw_data.get("rugcheck_raw", {}).get("error"))
+        social_available = not bool(raw_data.get("tweetscout_raw", {}).get("error"))
+        
+        quality_assessment["data_completeness"] = {
+            "dexscreener_complete": dex_available,
+            "rugcheck_complete": rugcheck_available,
+            "social_complete": social_available,
+            "total_sources_available": sum([dex_available, rugcheck_available, social_available])
+        }
+        
+        # Check data freshness
+        current_time = datetime.now()
+        quality_assessment["data_freshness"] = {
+            "collection_timestamp": raw_data.get("data_collection_timestamp"),
+            "age_minutes": 0,  # Just collected
+            "is_fresh": True
+        }
+        
+        # Add quality assessment to raw data
+        raw_data["data_quality_assessment"] = quality_assessment
+        raw_data["data_quality_notes"] = []
+        
+        # Add quality notes for AI
+        if not rugcheck_available:
+            raw_data["data_quality_notes"].append("RugCheck data unavailable - safety analysis limited")
+        if not social_available:
+            raw_data["data_quality_notes"].append("Social data unavailable - sentiment analysis limited")
+        if not dex_available:
+            raw_data["data_quality_notes"].append("DEX data unavailable - market analysis impossible")
+        
+        return raw_data
     
     def _get_empty_comprehensive_data(self, token_address: str, token_symbol: str, error_msg: str) -> Dict[str, Any]:
         """Return empty comprehensive data when collection fails"""

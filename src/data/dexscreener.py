@@ -100,14 +100,19 @@ def process_pair_data(pair_data: Dict) -> Dict[str, Any]:
         price_change = pair_data.get('priceChange', {})
         liquidity = pair_data.get('liquidity', {})
         
-        # Calculate buy/sell ratio (raw calculation, no interpretation)
+        # Calculate buy/sell ratio using all timeframes (raw calculation, no interpretation)
         buy_count = 0
         sell_count = 0
+        buyers_5m = 0
+        sellers_5m = 0
         for timeframe, txn_data in txns.items():
             if isinstance(txn_data, dict):
                 buy_count += txn_data.get('buys', 0)
                 sell_count += txn_data.get('sells', 0)
-        
+                if timeframe == 'm5':
+                    buyers_5m = txn_data.get('buyers', 0)   # Unique buyers (better pressure signal)
+                    sellers_5m = txn_data.get('sellers', 0) # Unique sellers
+
         total_txns = buy_count + sell_count
         buy_ratio = (buy_count / total_txns) if total_txns > 0 else 0.5
         
@@ -124,8 +129,9 @@ def process_pair_data(pair_data: Dict) -> Dict[str, Any]:
             # Raw liquidity data
             "liquidity_usd": float(liquidity.get('usd', 0)),
             
-            # Raw volume data
+            # Raw volume data (including 6h to fill h1–h24 gap)
             "volume_24h": float(volume.get('h24', 0)),
+            "volume_6h": float(volume.get('h6', 0)),
             "volume_1h": float(volume.get('h1', 0)),
             "volume_5m": float(volume.get('m5', 0)),
             
@@ -145,9 +151,16 @@ def process_pair_data(pair_data: Dict) -> Dict[str, Any]:
             # Raw transaction data
             "buy_count": buy_count,
             "sell_count": sell_count,
+            "buyers_5m": buyers_5m,    # Unique buyers in last 5 min (stronger pressure signal)
+            "sellers_5m": sellers_5m,  # Unique sellers in last 5 min
             "buy_ratio": buy_ratio,
             "total_transactions": total_txns,
-            
+
+            # Raw liquidity breakdown
+            "liquidity_usd": float(liquidity.get('usd', 0)),
+            "liquidity_base": float(liquidity.get('base', 0)),   # Base token liquidity
+            "liquidity_quote": float(liquidity.get('quote', 0)), # Quote token liquidity
+
             # Raw DEX data
             "pair_address": pair_data.get('pairAddress', ''),
             "dex_id": pair_data.get('dexId', ''),
@@ -627,6 +640,642 @@ def get_discovery_capabilities() -> Dict[str, Any]:
 # - How to prioritize and rank results
 
 # ============================================================================
+# NEW DISCOVERY ENDPOINTS
+# ============================================================================
+
+def get_community_takeover_tokens(chain_filter: str = "solana") -> List[Dict[str, Any]]:
+    """
+    Get tokens undergoing community governance takeovers — strong community backing signal.
+    Uses DexScreener /community-takeovers/latest/v1 endpoint.
+    """
+    cache_key = f"dexscreener_community_takeovers_{chain_filter}"
+    cached = get_cached_data(cache_key)
+    if cached:
+        return cached
+
+    url = f"{DEXSCREENER_BASE_URL}/community-takeovers/latest/v1"
+    data = make_api_call(url, timeout=15)
+
+    if not data:
+        return []
+
+    pairs = data if isinstance(data, list) else data.get('pairs', [])
+    tokens = []
+    for pair in pairs:
+        if chain_filter and pair.get('chainId', '').lower() != chain_filter.lower():
+            continue
+        processed = process_pair_data(pair)
+        if processed:
+            processed['discovery_source'] = 'community_takeover'
+            tokens.append(processed)
+
+    cache_data(cache_key, tokens, ttl_seconds=300)
+    logger.info(f"Found {len(tokens)} community takeover tokens on {chain_filter}")
+    return tokens
+
+
+def get_promoted_tokens(chain_filter: str = "solana") -> List[Dict[str, Any]]:
+    """
+    Get currently running paid promotions — detect over-hyped/manipulated tokens.
+    Uses DexScreener /ads/latest/v1 endpoint.
+    """
+    cache_key = f"dexscreener_ads_{chain_filter}"
+    cached = get_cached_data(cache_key)
+    if cached:
+        return cached
+
+    url = f"{DEXSCREENER_BASE_URL}/ads/latest/v1"
+    data = make_api_call(url, timeout=15)
+
+    if not data:
+        return []
+
+    pairs = data if isinstance(data, list) else data.get('pairs', [])
+    tokens = []
+    for pair in pairs:
+        if chain_filter and pair.get('chainId', '').lower() != chain_filter.lower():
+            continue
+        processed = process_pair_data(pair)
+        if processed:
+            processed['discovery_source'] = 'promoted_ad'
+            tokens.append(processed)
+
+    cache_data(cache_key, tokens, ttl_seconds=300)
+    logger.info(f"Found {len(tokens)} promoted tokens on {chain_filter}")
+    return tokens
+
+
+# ============================================================================
+# NEW ENHANCED TOOLS - 100% DexScreener API Coverage
+# ============================================================================
+
+def get_token_orders(chain_id: str, token_address: str) -> Dict[str, Any]:
+    """
+    Get order book information for a token
+
+    Critical for understanding:
+    - Market depth
+    - Pending whale orders
+    - Order flow patterns
+    - Liquidity availability
+
+    Args:
+        chain_id: Blockchain identifier (e.g., "solana")
+        token_address: Token address
+
+    Returns:
+        dict: Order book data including pending orders, status, and history
+    """
+    cache_key = f"dex_orders_{chain_id}_{token_address}"
+    cached_data = get_cached_data(cache_key)
+    if cached_data:
+        return cached_data
+
+    logger.info(f"Fetching order book for token: {token_address}")
+
+    try:
+        url = f"{ENDPOINTS['pair_detail']}/orders/v1/{chain_id}/{token_address}"
+        data = make_api_call(url)
+
+        if not data:
+            return {
+                'token_address': token_address,
+                'chain_id': chain_id,
+                'has_orders': False,
+                'orders_data': {},
+                'error': 'No order data available'
+            }
+
+        result = {
+            'token_address': token_address,
+            'chain_id': chain_id,
+            'has_orders': bool(data),
+            'orders_data': data,
+            'data_collection_timestamp': datetime.now().isoformat()
+        }
+
+        # Cache for 2 minutes (orders change frequently)
+        cache_data(cache_key, result, ttl_seconds=120)
+
+        logger.info(f"Retrieved order data for {token_address}")
+        return result
+
+    except Exception as e:
+        logger.error(f"Error fetching orders for {token_address}: {e}")
+        return {
+            'token_address': token_address,
+            'chain_id': chain_id,
+            'has_orders': False,
+            'orders_data': {},
+            'error': str(e)
+        }
+
+def get_pair_details(chain_id: str, pair_address: str) -> Dict[str, Any]:
+    """
+    Get detailed information for a specific trading pair
+
+    Provides deeper analysis than bulk endpoints:
+    - Enhanced transaction data
+    - Detailed liquidity breakdown
+    - Pair-specific metrics
+    - Real-time accuracy
+
+    Args:
+        chain_id: Blockchain identifier (e.g., "solana")
+        pair_address: DEX pair address
+
+    Returns:
+        dict: Comprehensive pair data
+    """
+    cache_key = f"dex_pair_detail_{chain_id}_{pair_address}"
+    cached_data = get_cached_data(cache_key)
+    if cached_data:
+        return cached_data
+
+    logger.info(f"Fetching detailed data for pair: {pair_address}")
+
+    try:
+        url = f"{ENDPOINTS['pair_detail']}/{chain_id}/{pair_address}"
+        data = make_api_call(url)
+
+        if not data or 'pairs' not in data:
+            logger.warning(f"No pair details found for: {pair_address}")
+            return {}
+
+        # Process the most detailed pair data
+        pairs = data.get('pairs', [])
+        if not pairs:
+            return {}
+
+        pair = pairs[0]
+        processed = process_pair_data(pair)
+
+        # Cache for 3 minutes
+        cache_data(cache_key, processed, ttl_seconds=180)
+
+        logger.info(f"Retrieved detailed data for pair: {pair_address}")
+        return processed
+
+    except Exception as e:
+        logger.error(f"Error fetching pair details for {pair_address}: {e}")
+        return {}
+
+def get_token_social_info(chain_id: str, token_address: str) -> Dict[str, Any]:
+    """
+    Extract social media and project information for a token
+
+    Critical for legitimacy verification:
+    - Official website
+    - Twitter/X presence
+    - Telegram community
+    - Discord server
+    - Project branding
+
+    Args:
+        chain_id: Blockchain identifier (e.g., "solana")
+        token_address: Token address
+
+    Returns:
+        dict: Social links, websites, imagery, and project info
+    """
+    cache_key = f"dex_social_{chain_id}_{token_address}"
+    cached_data = get_cached_data(cache_key)
+    if cached_data:
+        return cached_data
+
+    logger.info(f"Fetching social info for token: {token_address}")
+
+    try:
+        pairs_data = get_token_pairs(chain_id, token_address)
+
+        if not pairs_data:
+            return {
+                'token_address': token_address,
+                'has_social_data': False,
+                'error': 'No pair data available'
+            }
+
+        # Extract info from first pair (usually most liquid)
+        pair = pairs_data[0]
+        info = pair.get('info', {})
+
+        # Extract social links by type
+        socials = info.get('socials', [])
+        social_dict = {}
+        for social in socials:
+            social_type = social.get('type', 'unknown')
+            social_dict[social_type] = social.get('url', '')
+
+        social_data = {
+            'token_address': token_address,
+            'chain_id': chain_id,
+            'has_social_data': True,
+
+            # Visual branding
+            'image_url': info.get('imageUrl', ''),
+            'has_image': bool(info.get('imageUrl', '')),
+
+            # Websites
+            'websites': info.get('websites', []),
+            'website_count': len(info.get('websites', [])),
+            'has_website': len(info.get('websites', [])) > 0,
+            'primary_website': info.get('websites', [{}])[0].get('url', '') if info.get('websites') else '',
+
+            # Social media
+            'socials': socials,
+            'social_links': social_dict,
+            'social_count': len(socials),
+
+            # Specific platforms
+            'has_twitter': 'twitter' in social_dict,
+            'twitter_url': social_dict.get('twitter', ''),
+            'has_telegram': 'telegram' in social_dict,
+            'telegram_url': social_dict.get('telegram', ''),
+            'has_discord': 'discord' in social_dict,
+            'discord_url': social_dict.get('discord', ''),
+
+            # Legitimacy score
+            'legitimacy_score': (
+                (10 if info.get('imageUrl') else 0) +
+                (20 if len(info.get('websites', [])) > 0 else 0) +
+                (30 if 'twitter' in social_dict else 0) +
+                (20 if 'telegram' in social_dict else 0) +
+                (20 if 'discord' in social_dict else 0)
+            ),
+
+            'data_collection_timestamp': datetime.now().isoformat()
+        }
+
+        # Cache for 30 minutes (social info doesn't change often)
+        cache_data(cache_key, social_data, ttl_seconds=1800)
+
+        logger.info(f"Retrieved social info for {token_address} (legitimacy: {social_data['legitimacy_score']}/100)")
+        return social_data
+
+    except Exception as e:
+        logger.error(f"Error fetching social info for {token_address}: {e}")
+        return {
+            'token_address': token_address,
+            'chain_id': chain_id,
+            'has_social_data': False,
+            'error': str(e)
+        }
+
+def compare_token_pairs(chain_id: str, token_address: str) -> Dict[str, Any]:
+    """
+    Compare all trading pairs for a token across different DEXs
+
+    Helps identify:
+    - Best execution venue
+    - Arbitrage opportunities
+    - Liquidity fragmentation
+    - Price discrepancies
+
+    Args:
+        chain_id: Blockchain identifier (e.g., "solana")
+        token_address: Token address
+
+    Returns:
+        dict: Comparison of all pairs with recommendations
+    """
+    cache_key = f"dex_compare_pairs_{chain_id}_{token_address}"
+    cached_data = get_cached_data(cache_key)
+    if cached_data:
+        return cached_data
+
+    logger.info(f"Comparing all pairs for token: {token_address}")
+
+    try:
+        pairs_data = get_token_pairs(chain_id, token_address)
+
+        if not pairs_data:
+            return {
+                'token_address': token_address,
+                'error': 'No pairs found'
+            }
+
+        # Process all pairs
+        processed_pairs = []
+        for pair in pairs_data:
+            processed = process_pair_data(pair)
+            if processed:
+                processed_pairs.append(processed)
+
+        if not processed_pairs:
+            return {
+                'token_address': token_address,
+                'error': 'No valid pairs processed'
+            }
+
+        # Sort by liquidity (most liquid first)
+        sorted_by_liquidity = sorted(processed_pairs,
+                                     key=lambda x: x.get('liquidity_usd', 0),
+                                     reverse=True)
+
+        # Find best pair for trading (highest liquidity + volume score)
+        best_pair = None
+        best_score = 0
+
+        for pair in processed_pairs:
+            # Score = liquidity + (volume * 0.1)
+            liquidity = pair.get('liquidity_usd', 0)
+            volume = pair.get('volume_24h', 0)
+            score = liquidity + (volume * 0.1)
+
+            if score > best_score:
+                best_score = score
+                best_pair = pair
+
+        # Calculate price variance across pairs
+        prices = [p.get('price_usd', 0) for p in processed_pairs if p.get('price_usd', 0) > 0]
+        price_variance = 0
+        has_arbitrage = False
+
+        if len(prices) > 1:
+            max_price = max(prices)
+            min_price = min(prices)
+            price_variance = (max_price - min_price) / min_price * 100 if min_price > 0 else 0
+            has_arbitrage = price_variance > 2  # >2% difference = arbitrage opportunity
+
+        # Calculate total liquidity across all pairs
+        total_liquidity = sum(p.get('liquidity_usd', 0) for p in processed_pairs)
+        total_volume_24h = sum(p.get('volume_24h', 0) for p in processed_pairs)
+
+        result = {
+            'token_address': token_address,
+            'chain_id': chain_id,
+            'total_pairs': len(processed_pairs),
+            'all_pairs': processed_pairs,
+
+            # Best pair recommendations
+            'best_pair_for_trading': best_pair,
+            'most_liquid_pair': sorted_by_liquidity[0] if sorted_by_liquidity else None,
+
+            # Aggregate metrics
+            'total_liquidity_usd': total_liquidity,
+            'total_volume_24h': total_volume_24h,
+            'average_liquidity_per_pair': total_liquidity / len(processed_pairs) if processed_pairs else 0,
+
+            # Price analysis
+            'price_variance_percent': price_variance,
+            'has_arbitrage_opportunity': has_arbitrage,
+            'min_price_usd': min(prices) if prices else 0,
+            'max_price_usd': max(prices) if prices else 0,
+
+            # Recommendations
+            'recommendation': f"Use {best_pair.get('dex_id', 'N/A')} pair for best execution" if best_pair else "No recommendation available",
+            'liquidity_concentration': (sorted_by_liquidity[0].get('liquidity_usd', 0) / total_liquidity * 100) if total_liquidity > 0 and sorted_by_liquidity else 0,
+
+            'data_collection_timestamp': datetime.now().isoformat()
+        }
+
+        # Cache for 5 minutes
+        cache_data(cache_key, result, ttl_seconds=300)
+
+        logger.info(f"Compared {len(processed_pairs)} pairs for {token_address}")
+        return result
+
+    except Exception as e:
+        logger.error(f"Error comparing pairs for {token_address}: {e}")
+        return {
+            'token_address': token_address,
+            'error': str(e)
+        }
+
+def get_token_age_analysis(chain_id: str, token_address: str) -> Dict[str, Any]:
+    """
+    Detailed analysis of token age and pair creation history
+
+    Important for risk assessment:
+    - Very new tokens = higher risk
+    - Multiple new pairs = potential rug setup
+    - Oldest pair = original launch venue
+
+    Args:
+        chain_id: Blockchain identifier (e.g., "solana")
+        token_address: Token address
+
+    Returns:
+        dict: Age analysis with risk indicators
+    """
+    cache_key = f"dex_age_analysis_{chain_id}_{token_address}"
+    cached_data = get_cached_data(cache_key)
+    if cached_data:
+        return cached_data
+
+    logger.info(f"Analyzing token age for: {token_address}")
+
+    try:
+        pairs_data = get_token_pairs(chain_id, token_address)
+
+        if not pairs_data:
+            return {
+                'token_address': token_address,
+                'error': 'No pairs found for age analysis'
+            }
+
+        pair_ages = []
+        for pair in pairs_data:
+            created_at = pair.get('pairCreatedAt')
+            if created_at:
+                created_time = datetime.fromtimestamp(created_at / 1000)
+                age_hours = (datetime.now() - created_time).total_seconds() / 3600
+                pair_ages.append({
+                    'pair_address': pair.get('pairAddress'),
+                    'dex_id': pair.get('dexId'),
+                    'created_at': created_time.isoformat(),
+                    'age_hours': age_hours,
+                    'age_days': age_hours / 24,
+                    'liquidity_usd': pair.get('liquidity', {}).get('usd', 0)
+                })
+
+        if not pair_ages:
+            return {
+                'token_address': token_address,
+                'error': 'No pair creation timestamps available'
+            }
+
+        # Sort by age (oldest first)
+        pair_ages.sort(key=lambda x: x['age_hours'], reverse=True)
+
+        oldest_pair = pair_ages[0]
+        newest_pair = pair_ages[-1]
+        average_age = sum(p['age_hours'] for p in pair_ages) / len(pair_ages)
+
+        # Risk assessment based on oldest pair
+        risk_level = 'unknown'
+        risk_score = 0
+
+        if oldest_pair['age_hours'] < 1:
+            risk_level = 'extreme'
+            risk_score = 100
+        elif oldest_pair['age_hours'] < 24:
+            risk_level = 'very_high'
+            risk_score = 80
+        elif oldest_pair['age_hours'] < 168:  # Less than 1 week
+            risk_level = 'high'
+            risk_score = 60
+        elif oldest_pair['age_hours'] < 720:  # Less than 1 month
+            risk_level = 'medium'
+            risk_score = 40
+        else:
+            risk_level = 'low'
+            risk_score = 20
+
+        # Additional risk factors
+        if len(pair_ages) == 1:
+            risk_notes = "Single pair only - limited trading venues"
+        elif newest_pair['age_hours'] < 24 and len(pair_ages) > 3:
+            risk_notes = "Multiple new pairs created recently - possible manipulation setup"
+        else:
+            risk_notes = "Normal pair creation pattern"
+
+        result = {
+            'token_address': token_address,
+            'chain_id': chain_id,
+            'total_pairs': len(pair_ages),
+
+            # Age metrics
+            'oldest_pair': oldest_pair,
+            'newest_pair': newest_pair,
+            'average_age_hours': average_age,
+            'average_age_days': average_age / 24,
+            'all_pair_ages': pair_ages,
+
+            # Risk assessment
+            'risk_level': risk_level,
+            'risk_score': risk_score,
+            'risk_notes': risk_notes,
+
+            # Flags
+            'is_very_new': oldest_pair['age_hours'] < 24,
+            'is_less_than_week': oldest_pair['age_hours'] < 168,
+            'has_multiple_recent_pairs': sum(1 for p in pair_ages if p['age_hours'] < 24) > 2,
+
+            # Recommendation
+            'recommendation': f"Token is {risk_level} risk based on age ({oldest_pair['age_days']:.1f} days old)",
+
+            'data_collection_timestamp': datetime.now().isoformat()
+        }
+
+        # Cache for 10 minutes
+        cache_data(cache_key, result, ttl_seconds=600)
+
+        logger.info(f"Age analysis for {token_address}: {risk_level} risk ({oldest_pair['age_days']:.1f} days)")
+        return result
+
+    except Exception as e:
+        logger.error(f"Error analyzing token age for {token_address}: {e}")
+        return {
+            'token_address': token_address,
+            'error': str(e)
+        }
+
+def analyze_boost_activity(chain_id: str, token_address: str) -> Dict[str, Any]:
+    """
+    Analyze promotional boost activity for a token
+
+    Boosts indicate:
+    - Marketing spend (project has funding)
+    - Coordinated promotion
+    - Trending potential
+    - Developer engagement
+
+    Args:
+        chain_id: Blockchain identifier (e.g., "solana")
+        token_address: Token address
+
+    Returns:
+        dict: Boost activity analysis and historical data
+    """
+    cache_key = f"dex_boost_analysis_{chain_id}_{token_address}"
+    cached_data = get_cached_data(cache_key)
+    if cached_data:
+        return cached_data
+
+    logger.info(f"Analyzing boost activity for: {token_address}")
+
+    try:
+        # Check if token is in current boost lists
+        boosted_latest = get_boosted_tokens_latest(chain_id)
+        boosted_top = get_boosted_tokens_top(chain_id)
+
+        is_boosted_latest = any(t.get('address') == token_address for t in boosted_latest)
+        is_boosted_top = any(t.get('address') == token_address for t in boosted_top)
+
+        # Get detailed boost info from pairs
+        pairs_data = get_token_pairs(chain_id, token_address)
+        active_boosts = 0
+        boost_info = {}
+
+        if pairs_data:
+            pair = pairs_data[0]
+            boosts_data = pair.get('boosts', {})
+            active_boosts = boosts_data.get('active', 0)
+
+            # Check if boost_info exists in processed token
+            for token in boosted_latest + boosted_top:
+                if token.get('address') == token_address:
+                    boost_info = token.get('boost_info', {})
+                    break
+
+        # Promotion level classification
+        if active_boosts >= 5:
+            promotion_level = 'very_high'
+            promotion_score = 100
+        elif active_boosts >= 3:
+            promotion_level = 'high'
+            promotion_score = 75
+        elif active_boosts > 0:
+            promotion_level = 'medium'
+            promotion_score = 50
+        else:
+            promotion_level = 'none'
+            promotion_score = 0
+
+        result = {
+            'token_address': token_address,
+            'chain_id': chain_id,
+
+            # Boost status
+            'is_currently_boosted': is_boosted_latest or is_boosted_top,
+            'in_latest_boosts': is_boosted_latest,
+            'in_top_boosts': is_boosted_top,
+            'active_boost_count': active_boosts,
+            'boost_details': boost_info,
+
+            # Analysis
+            'has_marketing_budget': active_boosts > 0,
+            'promotion_level': promotion_level,
+            'promotion_score': promotion_score,
+
+            # Insights
+            'is_heavily_promoted': active_boosts >= 5,
+            'trending_potential': is_boosted_top,
+
+            # Recommendation
+            'recommendation': (
+                f"{'High' if active_boosts >= 3 else 'Medium' if active_boosts > 0 else 'No'} marketing activity detected"
+            ),
+
+            'data_collection_timestamp': datetime.now().isoformat()
+        }
+
+        # Cache for 5 minutes (boosts change frequently)
+        cache_data(cache_key, result, ttl_seconds=300)
+
+        logger.info(f"Boost analysis for {token_address}: {promotion_level} promotion ({active_boosts} active)")
+        return result
+
+    except Exception as e:
+        logger.error(f"Error analyzing boost activity for {token_address}: {e}")
+        return {
+            'token_address': token_address,
+            'chain_id': chain_id,
+            'error': str(e)
+        }
+
+# ============================================================================
 # Legacy Functions (minimal compatibility layer)
 # ============================================================================
 
@@ -636,7 +1285,7 @@ def get_top_tokens(chain="solana", max_results=20):
     AI agent should use individual source functions instead
     """
     logger.warning("Legacy get_top_tokens called - AI agent should use specific source functions")
-    
+
     # Return raw boosted tokens without any hardcoded filtering
     tokens = get_boosted_tokens_latest(chain)
     return tokens[:max_results]

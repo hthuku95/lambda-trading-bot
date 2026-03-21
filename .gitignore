@@ -1,16 +1,18 @@
-# Environment variables and secrets
+# ============================================================
+# SECRETS & ENVIRONMENT
+# ============================================================
 .env
 .env.*
 .env.template
-trading_agent.log
-pure_ai_trading.log
-# Python
+
+# ============================================================
+# PYTHON
+# ============================================================
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-env/
 build/
 develop-eggs/
 dist/
@@ -25,23 +27,91 @@ var/
 *.egg-info/
 .installed.cfg
 *.egg
+
+# ============================================================
+# VIRTUAL ENVIRONMENTS
+# ============================================================
+env/
 venv/
 .venv/
+../env/
 
-# Vector database
+# ============================================================
+# RUNTIME STATE (sensitive — contain balances / positions)
+# ============================================================
+agent_state*.json
+trading_state.json
+agent_daemon.pid
+agent_daemon_status.json
+chat_history*.json
+
+# ============================================================
+# DATABASES (local)
+# ============================================================
+*.db
+*.sqlite3
 chroma_db/
+langgraph_checkpoints.db
 
-# Logs and state files
+# ============================================================
+# LOGS
+# ============================================================
 *.log
 trading_agent.log
-agent_state.json
-trading_state.json
+pure_ai_trading.log
+agent_daemon.log
+logs/
 
-# Editor files
+# ============================================================
+# TERMINAL PASTE ARTIFACTS (pip install accidents, etc.)
+# ============================================================
+=*
+I
+Maybe
+" Maybe"
+When
+Where
+You
+remember
+agent_daemon_console.log
+
+# ============================================================
+# EDITOR & OS
+# ============================================================
 .vscode/
 .idea/
 *.swp
 *.swo
 .DS_Store
-env/
+Thumbs.db
 
+# ============================================================
+# DIAGNOSTIC / ONE-OFF SCRIPTS (generated during dev)
+# ============================================================
+dry_run_test.py
+simple_rugcheck_test.py
+test_imports.py
+test_rugcheck_fixed.py
+test_setup.py
+test_voyage.py
+quick_diagnostic.py
+list_models.py
+fix_balance_state.py
+
+# ============================================================
+# GENERATED DOCS (created during dev sessions)
+# ============================================================
+COMPLETE_UI_DAEMON_VERIFICATION.md
+DAEMON_SETUP.md
+DAEMON_UI_INTEGRATION_REPORT.md
+DEXSCREENER_API_ANALYSIS.md
+DEXSCREENER_ENHANCEMENTS_COMPLETE.md
+FINAL_VALIDATION_REPORT.md
+IMPLEMENTATION_COMPLETE.md
+PARALLEL_TRAINING_GUIDE.md
+PNL_TRACKING_EXPLAINED.md
+PUMP_FUN_STRATEGY.md
+VECTOR_DB_TRACKING_VERIFIED.md
+WALLET_SYNC_SOLUTION.md
+AGENT_CHAT_GUIDE.md
+GEMINI.md

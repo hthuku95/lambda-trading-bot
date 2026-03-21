@@ -1,16 +1,22 @@
 # ui/streamlit_dashboard.py
 """
-Main Streamlit dashboard - modular version
+Main Streamlit dashboard - Complete version with enterprise authentication
+All original functionality preserved with enhanced security
 """
 import streamlit as st
 import sys
 import os
-import time
 
 # Add the parent directory to the path to import our modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Import utilities and components
+# 🔐 AUTHENTICATION FIRST - Before any other imports
+from src.auth.enterprise_auth import enterprise_auth_manager as auth_manager
+
+# Require authentication before showing dashboard
+auth_manager.require_auth()
+
+# Only import dashboard components after authentication
 from ui.utils import configure_page, initialize_session_state, load_dashboard_data
 from ui.components import (
     render_sidebar,
@@ -25,58 +31,111 @@ from ui.components import (
 )
 
 def main():
-    """Main dashboard function"""
-    # Configure page
+    """Main dashboard function - Only accessible after authentication"""
+    
+    # Configure page settings
     configure_page()
     
-    # Initialize session state
+    # Add logout button and user info to sidebar
+    with st.sidebar:
+        st.markdown("---")
+        st.markdown("### 🔐 Security Info")
+        
+        # User information
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            username = st.session_state.get('username', 'User')
+            st.markdown(f"👤 **Logged in as:** {username}")
+            
+            # Show session info
+            login_time = st.session_state.get('login_time', 0)
+            if login_time:
+                from datetime import datetime
+                login_datetime = datetime.fromtimestamp(login_time)
+                st.markdown(f"🕒 **Login:** {login_datetime.strftime('%H:%M:%S')}")
+        
+        with col2:
+            if st.button("🚪 Logout", help="Securely logout from dashboard"):
+                auth_manager.logout()
+                st.rerun()
+        
+        # Security status indicators
+        st.markdown("---")
+        st.markdown("#### 🛡️ Security Status")
+
+        # Session timeout info
+        session_timeout_hours = auth_manager.session_timeout / 3600
+        st.info(f"⏱️ Session: {session_timeout_hours:.1f}h timeout")
+        st.success("🔒 Authenticated")
+    
+    # Initialize session state for dashboard
     initialize_session_state()
     
-    # Load dashboard data
+    # Load all dashboard data
     data = load_dashboard_data()
     
-    # Render header with mode indicator
+    # Render main header with mode indicator
     render_header()
     
-    # Render sidebar
+    # Render main sidebar (agent controls)
     render_sidebar(data)
     
-    # Render summary cards
+    # Render summary metrics cards
     render_summary_cards(data)
     
-    # Render performance overview
+    # Render performance overview section
     if data.get('agent_state'):
         render_performance_overview(data['agent_state'])
     
-    # Create tabs for different views
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📈 Portfolio", 
-        "🔍 Token Analysis", 
-        "📊 Trading History", 
-        "🧠 Agent Insights", 
+    # Create main dashboard tabs
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "📈 Portfolio",
+        "🔍 Token Analysis",
+        "📊 Trading History",
+        "🧠 Agent Insights",
+        "💬 Chat with Agents",
         "⚙️ System Status"
     ])
-    
-    # Render each tab
+
+    # Render each tab content
     with tab1:
         render_portfolio_tab(data)
-    
+
     with tab2:
         render_tokens_tab(data)
-    
+
     with tab3:
         render_trading_history_tab(data)
-    
+
     with tab4:
         render_insights_tab(data)
-    
+
     with tab5:
+        # Import and render chat tab
+        from ui.components.agent_chat import render_chat_tab
+        render_chat_tab()
+
+    with tab6:
         render_system_status_tab(data)
     
-    # Auto-refresh the dashboard when agent is running
-    if st.session_state.agent_running:
-        time.sleep(30)
-        st.rerun()
+    # Auto-refresh when agent is running (non-blocking)
+    if st.session_state.get('agent_running', False):
+        st.markdown(
+            "<meta http-equiv='refresh' content='30'>",
+            unsafe_allow_html=True
+        )
+    
+    # Footer with security notice
+    st.markdown("---")
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown(
+            "<div style='text-align: center; color: #666; font-size: 0.8em;'>"
+            "🔐 Secure Trading Dashboard | VPN + Authentication Required | "
+            "All activities are logged for security"
+            "</div>", 
+            unsafe_allow_html=True
+        )
 
 if __name__ == "__main__":
     main()
