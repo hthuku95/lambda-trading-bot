@@ -34,6 +34,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger("agent_daemon")
 
+# Initialise PostgreSQL (non-fatal if DB unavailable)
+try:
+    from src.db import init_db
+    from src.db.log_handler import attach_to_root_logger
+    _db_ready = init_db()
+    if _db_ready:
+        attach_to_root_logger(level=logging.INFO)
+        logger.info("PostgreSQL logging handler attached")
+except Exception as _db_err:
+    logger.warning(f"PostgreSQL init skipped: {_db_err}")
+
 # Global flag for graceful shutdown
 running = True
 reload_config = False
@@ -113,6 +124,21 @@ def run_agent_daemon():
         logger.info(f"🔧 Initializing {model_provider.upper()} agent...")
         agent = CompleteLangGraphTradingAgent(model_provider=model_provider)
 
+        # Create a DB session for this daemon run
+        _session_id = None
+        try:
+            from src.db.trade_store import create_session, end_session, mark_session_error
+            _session_id = create_session(
+                model_provider=model_provider,
+                trading_mode=parameters.get("trading_mode", "dry_run"),
+                parameters=parameters,
+                initial_balance_sol=state.get("wallet_balance_sol") or state.get("simulated_balance_sol"),
+            )
+            if _session_id:
+                logger.info(f"DB session created: {_session_id[:8]}...")
+        except Exception as _se:
+            logger.warning(f"DB session creation skipped: {_se}")
+
         create_status_file("running", f"Agent daemon started with {model_provider}")
         logger.info("✅ Agent daemon initialized successfully")
         logger.info("=" * 80)
@@ -148,6 +174,14 @@ def run_agent_daemon():
                 # Update cycle count
                 state["cycles_completed"] = cycle_count
                 state = update_portfolio_metrics(state)
+
+                # Record cycle to DB
+                if _session_id:
+                    try:
+                        from src.db.trade_store import record_cycle as _record_cycle
+                        _record_cycle(_session_id, cycle_count, state)
+                    except Exception as _ce:
+                        logger.debug(f"record_cycle skipped: {_ce}")
 
                 # Save state
                 save_agent_state(state)
@@ -192,6 +226,18 @@ def run_agent_daemon():
             state["session_end_timestamp"] = datetime.now().isoformat()
             save_agent_state(state)
             logger.info("💾 Final state saved")
+
+        # Close DB session
+        if _session_id:
+            try:
+                from src.db.trade_store import end_session as _end_session
+                _end_session(_session_id, {
+                    "cycles_completed": cycle_count,
+                    "total_profit_sol": state.get("total_profit_sol", 0) if state else 0,
+                    "wallet_balance_sol": (state.get("wallet_balance_sol") or state.get("simulated_balance_sol", 0)) if state else 0,
+                })
+            except Exception as _ee:
+                logger.debug(f"end_session skipped: {_ee}")
 
         create_status_file("stopped", "Agent daemon stopped gracefully")
 

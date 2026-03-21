@@ -534,6 +534,133 @@ def execute_trade_tool(
         logger.error(f"Trade execution error: {e}")
         return {"success": False, "error": str(e)}
 
+# ============================================================================
+# DB QUERY TOOLS — backed by src/db/query_store.py
+# ============================================================================
+
+@tool
+def query_trade_history_db_tool(
+    model_provider: str = None,
+    token_address: str = None,
+    trade_type: str = None,
+    days_back: int = 30,
+    limit: int = 20,
+) -> Dict[str, Any]:
+    """
+    Query past trades from the PostgreSQL database.
+    Use this to check how a specific token was traded before, identify losing patterns,
+    or see what trades a model made recently.
+    """
+    try:
+        from src.db.query_store import get_trade_history
+        trades = get_trade_history(
+            model_provider=model_provider,
+            token_address=token_address,
+            trade_type=trade_type,
+            days_back=days_back,
+            limit=limit,
+        )
+        return {"success": True, "trades": trades, "count": len(trades)}
+    except Exception as e:
+        logger.error(f"query_trade_history_db_tool error: {e}")
+        return {"success": False, "error": str(e), "trades": []}
+
+
+@tool
+def get_performance_analytics_db_tool(
+    model_provider: str = None,
+    days_back: int = 7,
+) -> Dict[str, Any]:
+    """
+    Get performance analytics from the database: win rate, avg P&L, Sharpe ratio,
+    max drawdown, best/worst trades. Use to evaluate recent strategy effectiveness.
+    """
+    try:
+        from src.db.query_store import get_performance_summary
+        summary = get_performance_summary(model_provider=model_provider, days_back=days_back)
+        return {"success": True, "analytics": summary}
+    except Exception as e:
+        logger.error(f"get_performance_analytics_db_tool error: {e}")
+        return {"success": False, "error": str(e), "analytics": {}}
+
+
+@tool
+def compare_model_performance_db_tool(days_back: int = 30) -> Dict[str, Any]:
+    """
+    Compare Claude vs Gemini performance side-by-side: sessions, trades, win rate,
+    total PnL, average profit. Use to determine which model strategy is outperforming.
+    """
+    try:
+        from src.db.query_store import compare_model_performance
+        comparison = compare_model_performance(days_back=days_back)
+        return {"success": True, "comparison": comparison}
+    except Exception as e:
+        logger.error(f"compare_model_performance_db_tool error: {e}")
+        return {"success": False, "error": str(e), "comparison": {}}
+
+
+@tool
+def get_session_history_db_tool(limit: int = 10) -> Dict[str, Any]:
+    """
+    Get past training session records: start/end times, cycle count, final balance,
+    total profit. Use to understand how previous training runs performed.
+    """
+    try:
+        from src.db.query_store import get_session_history
+        sessions = get_session_history(limit=limit)
+        return {"success": True, "sessions": sessions, "count": len(sessions)}
+    except Exception as e:
+        logger.error(f"get_session_history_db_tool error: {e}")
+        return {"success": False, "error": str(e), "sessions": []}
+
+
+@tool
+def search_system_logs_db_tool(
+    level: str = None,
+    keyword: str = None,
+    logger_name: str = None,
+    hours_back: int = 24,
+    limit: int = 50,
+) -> Dict[str, Any]:
+    """
+    Search structured system logs in the database by log level (ERROR/WARNING/INFO),
+    keyword, or logger name. Use to diagnose issues or review recent agent activity.
+    """
+    try:
+        from src.db.query_store import search_logs
+        logs = search_logs(
+            level=level,
+            keyword=keyword,
+            logger_name=logger_name,
+            hours_back=hours_back,
+            limit=limit,
+        )
+        return {"success": True, "logs": logs, "count": len(logs)}
+    except Exception as e:
+        logger.error(f"search_system_logs_db_tool error: {e}")
+        return {"success": False, "error": str(e), "logs": []}
+
+
+@tool
+def get_top_tokens_db_tool(
+    metric: str = "profit_percentage",
+    limit: int = 10,
+    days_back: int = 30,
+) -> Dict[str, Any]:
+    """
+    Get historically best-performing tokens from the database.
+    metric options: 'profit_percentage' (avg return), 'trade_count' (most traded),
+    'total_pnl_sol' (highest total profit). Use to weight token selection.
+    """
+    try:
+        from src.db.query_store import get_top_performing_tokens
+        tokens = get_top_performing_tokens(metric=metric, limit=limit, days_back=days_back)
+        return {"success": True, "tokens": tokens, "count": len(tokens), "metric": metric}
+    except Exception as e:
+        logger.error(f"get_top_tokens_db_tool error: {e}")
+        return {"success": False, "error": str(e), "tokens": []}
+
+
 # LEARNING AND MEMORY TOOLS
 @tool
 def save_trading_experience_tool(
@@ -693,7 +820,11 @@ class CompleteLangGraphTradingAgent:
             get_safety_data_tool, get_social_data_tool, search_trading_history_tool,
             find_similar_tokens_tool, get_trading_patterns_tool, get_swap_quote_tool,
             execute_trade_tool, save_trading_experience_tool, check_system_status_tool,
-            get_market_overview_tool
+            get_market_overview_tool,
+            # DB analytics tools
+            query_trade_history_db_tool, get_performance_analytics_db_tool,
+            compare_model_performance_db_tool, get_session_history_db_tool,
+            search_system_logs_db_tool, get_top_tokens_db_tool,
         ]
 
     def _build_graph(self):

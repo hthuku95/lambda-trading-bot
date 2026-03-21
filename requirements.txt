@@ -19,6 +19,9 @@ openai
 # Vector Database
 astrapy>=2.0.0
 
+# PostgreSQL
+psycopg2>=2.9.9
+
 # Core Dependencies
 aiohappyeyeballs
 aiohttp

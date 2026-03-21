@@ -601,8 +601,17 @@ def save_agent_state(state: AgentState, filename: str = None) -> bool:
             os.replace(tmp_filename, filename)
 
             logger.info(f"Agent state saved successfully to {filename}")
+
+            # Mirror snapshot to PostgreSQL (non-fatal)
+            try:
+                from src.db.trade_store import save_state_snapshot
+                model_provider = state.get("agent_parameters", {}).get("model_provider", "unknown")
+                save_state_snapshot(model_provider, serializable_state)
+            except Exception:
+                pass
+
             return True
-            
+
         except Exception as e:
             logger.error(f"Error saving agent state: {e}")
             return False

@@ -5,7 +5,6 @@ Secure authentication with session management and rate limiting.
 """
 import os
 import time
-import sqlite3
 import logging
 from datetime import datetime
 from typing import Dict, Any, Tuple
@@ -47,27 +46,7 @@ class EnterpriseAuth:
         self.max_login_attempts = int(os.getenv("MAX_LOGIN_ATTEMPTS", "5"))
         self.lockout_duration = int(os.getenv("LOCKOUT_DURATION_MINUTES", "15")) * 60
 
-        # SQLite-backed rate limiting (survives process restarts)
-        self._db_path = os.path.join(os.path.dirname(__file__), "..", "..", "logs", "rate_limit.db")
-        self._init_db()
-
         audit_logger.info("Enterprise Auth initialized")
-
-    def _init_db(self):
-        """Initialise SQLite tables for rate limiting persistence."""
-        with sqlite3.connect(self._db_path) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS login_attempts (
-                    client_key TEXT NOT NULL,
-                    attempt_time REAL NOT NULL
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS lockouts (
-                    client_key TEXT PRIMARY KEY,
-                    lockout_time REAL NOT NULL
-                )
-            """)
 
     def _log_security_event(self, event_type: str, details: Dict[str, Any]):
         """Log security events for audit trail."""
@@ -84,59 +63,47 @@ class EnterpriseAuth:
         return st.runtime.scriptrunner.get_script_run_ctx().session_id if hasattr(st, 'runtime') else "default"
 
     def _is_locked_out(self, client_key: str) -> bool:
-        """Check if client is currently locked out (DB-backed)."""
-        with sqlite3.connect(self._db_path) as conn:
-            row = conn.execute(
-                "SELECT lockout_time FROM lockouts WHERE client_key = ?", (client_key,)
-            ).fetchone()
-        if row:
-            if time.time() - row[0] < self.lockout_duration:
-                return True
-            else:
-                with sqlite3.connect(self._db_path) as conn:
-                    conn.execute("DELETE FROM lockouts WHERE client_key = ?", (client_key,))
-        return False
+        """Check if client is currently locked out (PostgreSQL-backed)."""
+        try:
+            from src.db.auth_store import is_locked_out
+            return is_locked_out(client_key)
+        except Exception:
+            return False
 
     def _record_failed_attempt(self, client_key: str, username: str):
         """Record failed login attempt and apply lockout if needed."""
-        current_time = time.time()
-        cutoff = current_time - 3600  # 1-hour window
-
-        with sqlite3.connect(self._db_path) as conn:
-            # Clean old attempts
-            conn.execute("DELETE FROM login_attempts WHERE client_key = ? AND attempt_time < ?", (client_key, cutoff))
-            # Record new attempt
-            conn.execute("INSERT INTO login_attempts (client_key, attempt_time) VALUES (?, ?)", (client_key, current_time))
-            # Check total
-            count = conn.execute(
-                "SELECT COUNT(*) FROM login_attempts WHERE client_key = ?", (client_key,)
-            ).fetchone()[0]
-
+        try:
+            from src.db.auth_store import (
+                record_failed_attempt, get_recent_attempt_count, record_lockout
+            )
+            record_failed_attempt(client_key, username)
+            count = get_recent_attempt_count(client_key)
             if count >= self.max_login_attempts:
-                conn.execute(
-                    "INSERT OR REPLACE INTO lockouts (client_key, lockout_time) VALUES (?, ?)",
-                    (client_key, current_time)
-                )
+                record_lockout(client_key)
                 self._log_security_event('ACCOUNT_LOCKOUT', {
                     'username': username,
                     'attempts_count': count,
                     'lockout_duration_minutes': self.lockout_duration / 60
                 })
+        except Exception as e:
+            audit_logger.error(f"_record_failed_attempt error: {e}")
 
     def _clear_failed_attempts(self, client_key: str):
         """Clear failed attempts after successful login."""
-        with sqlite3.connect(self._db_path) as conn:
-            conn.execute("DELETE FROM login_attempts WHERE client_key = ?", (client_key,))
+        try:
+            from src.db.auth_store import clear_old_attempts, clear_lockout
+            clear_old_attempts(client_key)
+            clear_lockout(client_key)
+        except Exception:
+            pass
 
     def _get_remaining_attempts(self, client_key: str) -> int:
         """Return how many attempts remain before lockout."""
-        cutoff = time.time() - 3600
-        with sqlite3.connect(self._db_path) as conn:
-            count = conn.execute(
-                "SELECT COUNT(*) FROM login_attempts WHERE client_key = ? AND attempt_time >= ?",
-                (client_key, cutoff)
-            ).fetchone()[0]
-        return max(0, self.max_login_attempts - count)
+        try:
+            from src.db.auth_store import get_remaining_attempts
+            return get_remaining_attempts(client_key)
+        except Exception:
+            return self.max_login_attempts
 
     def verify_credentials(self, username: str, password: str) -> bool:
         """Verify login credentials securely (no debug output)."""
@@ -187,11 +154,8 @@ class EnterpriseAuth:
         client_key = self._get_client_key()
 
         if self._is_locked_out(client_key):
-            with sqlite3.connect(self._db_path) as conn:
-                row = conn.execute("SELECT lockout_time FROM lockouts WHERE client_key = ?", (client_key,)).fetchone()
-            remaining_time = self.lockout_duration - (time.time() - row[0])
             self._log_security_event('LOGIN_ATTEMPT_DURING_LOCKOUT', {'username': username})
-            return False, f"Account locked. Try again in {int(remaining_time/60)} minutes."
+            return False, f"Account locked. Try again in {int(self.lockout_duration/60)} minutes."
 
         if self.verify_credentials(username, password):
             current_time = time.time()
@@ -203,6 +167,11 @@ class EnterpriseAuth:
                 'username': username,
                 'login_time': datetime.fromtimestamp(current_time).isoformat()
             })
+            try:
+                from src.db.auth_store import log_auth_event
+                log_auth_event('login', username, success=True)
+            except Exception:
+                pass
             return True, "Login successful"
         else:
             self._record_failed_attempt(client_key, username)
@@ -211,6 +180,11 @@ class EnterpriseAuth:
                 'username': username,
                 'remaining_attempts': remaining
             })
+            try:
+                from src.db.auth_store import log_auth_event
+                log_auth_event('login', username, success=False)
+            except Exception:
+                pass
             if remaining > 0:
                 return False, f"Invalid credentials. {remaining} attempts remaining."
             else:
@@ -254,11 +228,8 @@ class EnterpriseAuth:
 
             client_key = self._get_client_key()
             if self._is_locked_out(client_key):
-                with sqlite3.connect(self._db_path) as conn:
-                    row = conn.execute("SELECT lockout_time FROM lockouts WHERE client_key = ?", (client_key,)).fetchone()
-                remaining_time = self.lockout_duration - (time.time() - row[0])
                 st.error("🚫 **Account Locked**")
-                st.warning(f"Too many failed attempts. Try again in {int(remaining_time/60)} minutes.")
+                st.warning(f"Too many failed attempts. Try again in {int(self.lockout_duration/60)} minutes.")
                 return
 
             remaining_attempts = self._get_remaining_attempts(client_key)
