@@ -1,0 +1,161 @@
+# render.yaml — Render Blueprint for Lambda Trading Bot
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Services defined here:
+#   1. lambda-trading-bot-daemon  — Background Worker (agent_daemon.py)
+#   2. lambda-trading-bot-dashboard — Web Service   (Streamlit UI)
+#
+# The existing PostgreSQL database (lambda-trading-bot-db) is referenced via
+# fromDatabase so Render injects the internal connection string automatically.
+#
+# Secrets (sync: false) must be added manually in the Render dashboard after
+# the first deploy — they are never stored in this file.
+
+services:
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 1. Trading Agent Daemon  (Background Worker — no public port)
+  # ─────────────────────────────────────────────────────────────────────────
+  - type: worker
+    name: lambda-trading-bot-daemon
+    runtime: python
+    repo: https://github.com/hthuku95/lambda-trading-bot
+    branch: master
+    buildCommand: pip install -r requirements.txt
+    startCommand: python agent_daemon.py
+    plan: starter  # upgrade to standard/pro as needed
+    envVars:
+      # ── PostgreSQL (internal — same Render network, no SSL routing issues) ──
+      - key: DATABASE_URL_INTERNAL
+        fromDatabase:
+          name: lambda-trading-bot-db
+          property: internalConnectionString
+      # External URL kept for tooling / ad-hoc psql access
+      - key: DATABASE_URL
+        fromDatabase:
+          name: lambda-trading-bot-db
+          property: connectionString
+
+      # ── Non-secret config ──────────────────────────────────────────────
+      - key: LANGCHAIN_TRACING_V2
+        value: "true"
+      - key: LANGCHAIN_ENDPOINT
+        value: "https://api.smith.langchain.com"
+      - key: LANGCHAIN_PROJECT
+        value: "lambda_trading_bot"
+      - key: MAX_POSITION_SIZE_SOL
+        value: "0.1"
+      - key: MIN_POSITION_SIZE_SOL
+        value: "0.01"
+      - key: MAX_POSITIONS
+        value: "5"
+      - key: CYCLE_TIME_SECONDS
+        value: "300"
+      - key: RISK_TOLERANCE
+        value: "high"
+      - key: SANDBOX_INITIAL_BALANCE_SOL
+        value: "10.0"
+      - key: SESSION_TIMEOUT_HOURS
+        value: "8"
+      - key: MAX_LOGIN_ATTEMPTS
+        value: "5"
+      - key: LOCKOUT_DURATION_MINUTES
+        value: "15"
+
+      # ── Secrets — set values manually in Render dashboard ──────────────
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: ASTRA_DB_APPLICATION_TOKEN
+        sync: false
+      - key: ASTRA_DB_API_ENDPOINT
+        sync: false
+      - key: VOYAGEAI_API_KEY
+        sync: false
+      - key: SOLANA_PRIVATE_KEY
+        sync: false
+      - key: SOLANA_RPC_URL
+        sync: false
+      - key: LANGCHAIN_API_KEY
+        sync: false
+      - key: DASHBOARD_USERNAME
+        sync: false
+      - key: DASHBOARD_PASSWORD
+        sync: false
+      - key: SESSION_SECRET_KEY
+        sync: false
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 2. Streamlit Dashboard  (Web Service — public HTTPS)
+  # ─────────────────────────────────────────────────────────────────────────
+  - type: web
+    name: lambda-trading-bot-dashboard
+    runtime: python
+    repo: https://github.com/hthuku95/lambda-trading-bot
+    branch: master
+    buildCommand: pip install -r requirements.txt
+    startCommand: >
+      streamlit run ui/streamlit_dashboard.py
+      --server.port $PORT
+      --server.address 0.0.0.0
+      --server.headless true
+      --server.enableCORS false
+      --server.enableXsrfProtection false
+    plan: starter
+    envVars:
+      # ── PostgreSQL ──────────────────────────────────────────────────────
+      - key: DATABASE_URL_INTERNAL
+        fromDatabase:
+          name: lambda-trading-bot-db
+          property: internalConnectionString
+      - key: DATABASE_URL
+        fromDatabase:
+          name: lambda-trading-bot-db
+          property: connectionString
+
+      # ── Non-secret config ──────────────────────────────────────────────
+      - key: LANGCHAIN_TRACING_V2
+        value: "true"
+      - key: LANGCHAIN_ENDPOINT
+        value: "https://api.smith.langchain.com"
+      - key: LANGCHAIN_PROJECT
+        value: "lambda_trading_bot"
+      - key: MAX_POSITION_SIZE_SOL
+        value: "0.1"
+      - key: SANDBOX_INITIAL_BALANCE_SOL
+        value: "10.0"
+      - key: SESSION_TIMEOUT_HOURS
+        value: "8"
+      - key: MAX_LOGIN_ATTEMPTS
+        value: "5"
+      - key: LOCKOUT_DURATION_MINUTES
+        value: "15"
+
+      # ── Secrets — set values manually in Render dashboard ──────────────
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: ASTRA_DB_APPLICATION_TOKEN
+        sync: false
+      - key: ASTRA_DB_API_ENDPOINT
+        sync: false
+      - key: VOYAGEAI_API_KEY
+        sync: false
+      - key: SOLANA_PRIVATE_KEY
+        sync: false
+      - key: SOLANA_RPC_URL
+        sync: false
+      - key: LANGCHAIN_API_KEY
+        sync: false
+      - key: DASHBOARD_USERNAME
+        sync: false
+      - key: DASHBOARD_PASSWORD
+        sync: false
+      - key: SESSION_SECRET_KEY
+        sync: false

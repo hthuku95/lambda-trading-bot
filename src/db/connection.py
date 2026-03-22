@@ -19,7 +19,9 @@ def init_pool(min_conn: int = 2, max_conn: int = 15) -> bool:
     global _pool
     if _pool is not None:
         return True
-    dsn = os.environ.get("DATABASE_URL")
+    # Prefer internal URL (set by Render's Blueprint fromDatabase) — no SSL routing issues.
+    # Fall back to external DATABASE_URL for local development.
+    dsn = os.environ.get("DATABASE_URL_INTERNAL") or os.environ.get("DATABASE_URL")
     if not dsn:
         logger.warning("DATABASE_URL not set — PostgreSQL features disabled")
         return False
