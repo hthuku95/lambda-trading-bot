@@ -18,6 +18,15 @@ from .multi_agent_manager import (
     stop_multi_agent_system, get_multi_agent_status, is_multi_agent_running,
 )
 
+# Import agent chat functions (required by ui/components/agent_chat.py)
+from .agent_chat import (
+    get_agent_chat,
+    get_multi_agent_chat,
+    chat_with_claude,
+    chat_with_gemini,
+    chat_with_both_agents,
+)
+
 # Import state management (unchanged)
 from .state import (
     AgentState, TokenData, Position, 
@@ -207,6 +216,13 @@ __all__ = [
     "stop_multi_agent_system",
     "get_multi_agent_status",
     "is_multi_agent_running",
+
+    # Agent chat functions
+    "get_agent_chat",
+    "get_multi_agent_chat",
+    "chat_with_claude",
+    "chat_with_gemini",
+    "chat_with_both_agents",
 
     # State management
     "load_agent_state",
