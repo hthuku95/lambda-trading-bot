@@ -39,7 +39,15 @@ src/memory/
 src/blockchain/
     solana_client.py          ← Solana RPC + wallet + transaction signing
 src/auth/
-    enterprise_auth.py        ← bcrypt auth + SQLite rate limiting
+    enterprise_auth.py        ← bcrypt auth + PostgreSQL rate limiting (SQLite removed)
+src/db/
+    __init__.py               ← init_db() — call once at startup
+    connection.py             ← ThreadedConnectionPool; prefers DATABASE_URL_INTERNAL
+    schema.py                 ← ensure_schema() — 13 tables, idempotent
+    auth_store.py             ← login attempts, lockouts, auth events
+    log_handler.py            ← PostgreSQLLogHandler — non-blocking queue-based
+    trade_store.py            ← write ops: sessions, cycles, trades, positions, snapshots
+    query_store.py            ← read ops: analytics queries backing the 6 DB tools
 ```
 
 ## Default Models
@@ -56,6 +64,20 @@ src/auth/
 4. **Tool output truncated at 4,000 chars** — prevents context window overflow in LangGraph cycles.
 5. **No VPN enforcement** — VPN feature removed entirely. Do not add it back.
 
+## Render Deployment
+
+| Service | Type | ID | URL |
+|---------|------|----|-----|
+| `lambda-trading-bot-daemon` | Background Worker | `srv-d6vj7kngi27c73f1hq20` | N/A |
+| `lambda-trading-bot-dashboard` | Web Service | `srv-d6vj7sn5gffc73dc2or0` | https://lambda-trading-bot-dashboard.onrender.com |
+| `lambda-trading-bot-db` | PostgreSQL | `dpg-d6v3oev5gffc73d3fjvg-a` | ohio, basic_256mb |
+
+- `render.yaml` defines both services as a Blueprint — push to master triggers auto-redeploy.
+- On Render, `DATABASE_URL_INTERNAL` is set automatically; `connection.py` prefers it.
+- Local dev: DB gracefully disabled (all `src/db/` functions guard with `if not is_available(): return`).
+- **psycopg2 note**: local venv uses source-built `psycopg2` (avoids bundled OpenSSL 1.1 bug);
+  `requirements.txt` uses `psycopg2-binary` for Render build servers.
+
 ## Known Pending User Actions
 
 | Item | What's needed |
@@ -63,6 +85,28 @@ src/auth/
 | TweetScout replacement | Decide on a replacement social data source (TweetScout deprecated; DexScreener social active) |
 | LangSmith feedback loop | Attach P&L outcome feedback to LangSmith traces when positions close (optional enhancement) |
 | Human-in-the-loop | Pause graph for trades above configurable SOL threshold (optional enhancement) |
+
+## What Was Completed (Session 3 — 2026-03-22)
+
+### PostgreSQL Integration
+- `src/db/` package created (7 files): ThreadedConnectionPool, 13-table schema, auth_store, non-blocking log handler, trade_store (write), query_store (analytics reads)
+- `enterprise_auth.py` migrated from SQLite → PostgreSQL (`auth_store`)
+- `agent_daemon.py`: `init_db()` at startup, `PostgreSQLLogHandler` attached, per-session/cycle DB tracking
+- `state.py`: `save_agent_state()` also snapshots to DB after every file write
+- `langgraph_trading_agent.py`: 6 new `@tool` DB query functions added to agent tool belt:
+  `query_trade_history_db_tool`, `get_performance_analytics_db_tool`, `compare_model_performance_db_tool`, `get_session_history_db_tool`, `search_system_logs_db_tool`, `get_top_tokens_db_tool`
+
+### Render Deployment
+- `render.yaml` Blueprint: daemon (Background Worker) + dashboard (Web Service)
+- `.python-version`: `3.12.0`
+- Both services deployed and live (commits `f03ae42`, `20181b2`)
+- Dashboard: https://lambda-trading-bot-dashboard.onrender.com
+
+### Infrastructure
+- GitHub: project pushed at `hthuku95/lambda-trading-bot`
+- `psycopg2` (source build) in local venv; `psycopg2-binary` in `requirements.txt` for Render
+
+---
 
 ## What Was Completed (Sessions 1 + 2 — 2026-03-21)
 
