@@ -12,6 +12,12 @@ from typing import Dict, Any, Optional
 # Import LangGraph implementation (THE KEY CHANGE)
 from .langgraph_trading_agent import run_langgraph_trading_cycle, CompleteLangGraphTradingAgent
 
+# Import multi-agent coordinator functions (required by Streamlit sidebar)
+from .multi_agent_manager import (
+    start_demo_parallel_mode, start_live_hybrid_mode,
+    stop_multi_agent_system, get_multi_agent_status, is_multi_agent_running,
+)
+
 # Import state management (unchanged)
 from .state import (
     AgentState, TokenData, Position, 
@@ -189,21 +195,28 @@ def get_agent_status() -> Dict[str, Any]:
 __all__ = [
     # Main agent functions
     "run_trading_agent",
-    
-    # Background management (THESE WERE MISSING)
-    "start_agent_background", 
+
+    # Background management
+    "start_agent_background",
     "stop_agent_background",
     "get_agent_status",
-    
-    # State management  
+
+    # Multi-agent coordinator
+    "start_demo_parallel_mode",
+    "start_live_hybrid_mode",
+    "stop_multi_agent_system",
+    "get_multi_agent_status",
+    "is_multi_agent_running",
+
+    # State management
     "load_agent_state",
-    "save_agent_state", 
+    "save_agent_state",
     "create_initial_state",
     "update_portfolio_metrics",
     "get_state_summary",
-    
+
     # State types
     "AgentState",
-    "TokenData", 
-    "Position"
+    "TokenData",
+    "Position",
 ]
