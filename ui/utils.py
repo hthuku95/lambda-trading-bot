@@ -3,7 +3,7 @@
 Utility functions for the Streamlit dashboard
 """
 import streamlit as st
-from src.agent import load_agent_state
+from src.agent import load_agent_state, create_initial_state
 from src.blockchain.solana_client import get_wallet_balance
 from src.memory.cache import get_cache_stats
 from src.memory.astra_vector_store import get_memory_stats
@@ -12,11 +12,11 @@ from src.memory.astra_vector_store import get_memory_stats
 def load_dashboard_data():
     """Load all data needed for the dashboard"""
     try:
-        agent_state = load_agent_state()
+        agent_state = load_agent_state() or create_initial_state()
         wallet_balance = get_wallet_balance()
         cache_stats = get_cache_stats()
         memory_stats = get_memory_stats()
-        
+
         return {
             'agent_state': agent_state,
             'wallet_balance': wallet_balance,
@@ -26,7 +26,7 @@ def load_dashboard_data():
     except Exception as e:
         st.error(f"Error loading dashboard data: {e}")
         return {
-            'agent_state': None,
+            'agent_state': create_initial_state(),
             'wallet_balance': 0,
             'cache_stats': {},
             'memory_stats': {}

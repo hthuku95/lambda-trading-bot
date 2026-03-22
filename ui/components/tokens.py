@@ -104,7 +104,7 @@ def render_tokens_tab(data):
     st.header("🔍 Token Analysis")
     
     # Get validated tokens
-    agent_state = data.get('agent_state', {})
+    agent_state = data.get('agent_state') or {}
     tokens = agent_state.get('validated_tokens', [])
     
     if not tokens:
@@ -270,7 +270,7 @@ def render_portfolio_tab(data):
     """Render the portfolio tab with RugCheck + TweetScout enhancements"""
     st.header("📈 Portfolio")
     
-    agent_state = data.get('agent_state', {})
+    agent_state = data.get('agent_state') or {}
     positions = agent_state.get('active_positions', [])
     portfolio_metrics = agent_state.get('portfolio_metrics', {})
     
@@ -319,7 +319,7 @@ def render_enrichment_insights(data):
     """Render insights about token enrichment quality"""
     st.subheader("🔬 Token Enrichment Insights")
     
-    agent_state = data.get('agent_state', {})
+    agent_state = data.get('agent_state') or {}
     tokens = agent_state.get('validated_tokens', [])
     
     if not tokens:
@@ -359,7 +359,7 @@ def render_safety_analysis_insights(data):
     """Render safety analysis insights from RugCheck"""
     st.subheader("🛡️ Safety Analysis Insights")
     
-    agent_state = data.get('agent_state', {})
+    agent_state = data.get('agent_state') or {}
     tokens = agent_state.get('validated_tokens', [])
     enriched_tokens = [t for t in tokens if t.get('enriched', False)]
     
@@ -404,7 +404,7 @@ def render_social_sentiment_insights(data):
     """Render social sentiment insights from TweetScout"""
     st.subheader("📱 Social Sentiment Insights")
     
-    agent_state = data.get('agent_state', {})
+    agent_state = data.get('agent_state') or {}
     tokens = agent_state.get('validated_tokens', [])
     enriched_tokens = [t for t in tokens if t.get('enriched', False)]
     
@@ -448,7 +448,7 @@ def render_trading_recommendations_insights(data):
     """Render insights about trading recommendations"""
     st.subheader("💡 Trading Recommendations Insights")
     
-    agent_state = data.get('agent_state', {})
+    agent_state = data.get('agent_state') or {}
     tokens = agent_state.get('validated_tokens', [])
     enriched_tokens = [t for t in tokens if t.get('enriched', False)]
     
