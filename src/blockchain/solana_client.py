@@ -383,3 +383,73 @@ def verify_transaction(signature, max_retries=5, retry_delay=2):
     # If we get here, all retries failed
     logger.error("Failed to verify transaction")
     return False
+
+
+# ============================================================================
+# DEVNET SUPPORT — for integration testing without spending real SOL
+# ============================================================================
+
+def get_devnet_rpc_client() -> Client:
+    """
+    Returns a Solana RPC Client pointed at devnet.
+    Uses SOLANA_DEVNET_RPC_URL env var (defaults to public devnet).
+    """
+    devnet_url = os.getenv("SOLANA_DEVNET_RPC_URL", "https://api.devnet.solana.com")
+    return Client(devnet_url)
+
+
+def load_devnet_wallet() -> "Keypair":
+    """
+    Load a separate devnet wallet from SOLANA_DEVNET_PRIVATE_KEY.
+    This key should ONLY hold devnet SOL (no real funds).
+    Raises ValueError if the env var is not set.
+    """
+    devnet_key = os.getenv("SOLANA_DEVNET_PRIVATE_KEY")
+    if not devnet_key:
+        raise ValueError("SOLANA_DEVNET_PRIVATE_KEY not set — needed for devnet integration tests")
+    key_bytes = base58.b58decode(devnet_key)
+    return Keypair.from_bytes(key_bytes)
+
+
+def send_devnet_transaction(serialized_tx_base64: str, max_retries: int = 2) -> dict:
+    """
+    Submit a pre-signed serialized transaction to Solana devnet.
+    Used exclusively in integration tests — never called in production.
+
+    Args:
+        serialized_tx_base64: Base64-encoded VersionedTransaction
+        max_retries: Retry attempts (default 2)
+
+    Returns:
+        dict with "result" (txid str) or "error" (message str)
+    """
+    devnet_client = get_devnet_rpc_client()
+    devnet_wallet = load_devnet_wallet()
+
+    try:
+        tx_bytes = b64decode(serialized_tx_base64)
+        transaction = VersionedTransaction.from_bytes(tx_bytes)
+        message_bytes = to_bytes_versioned(transaction.message)
+        signature = devnet_wallet.sign_message(message_bytes)
+        signed_tx = VersionedTransaction.populate(transaction.message, [signature])
+
+        for attempt in range(max_retries):
+            try:
+                txid = devnet_client.send_raw_transaction(
+                    bytes(signed_tx),
+                    opts={"preflight_commitment": "confirmed", "skip_preflight": True}
+                )
+                if txid and hasattr(txid, "value"):
+                    logger.info(f"[DEVNET] Transaction submitted: {txid.value}")
+                    return {"result": str(txid.value)}
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                    continue
+                return {"error": {"message": str(e)}}
+
+        return {"error": {"message": "All devnet transaction attempts failed"}}
+
+    except Exception as e:
+        logger.error(f"[DEVNET] Transaction error: {e}")
+        return {"error": {"message": str(e)}}

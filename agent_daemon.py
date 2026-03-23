@@ -218,7 +218,7 @@ def run_agent_daemon():
                 model_provider=model_provider,
                 trading_mode=parameters.get("trading_mode", "dry_run"),
                 parameters=parameters,
-                initial_balance_sol=state.get("wallet_balance_sol") or state.get("simulated_balance_sol"),
+                initial_balance_sol=state.get("wallet_balance_sol"),
             )
             if _session_id:
                 logger.info(f"DB session created: {_session_id[:8]}...")
@@ -320,7 +320,7 @@ def run_agent_daemon():
                 _end_session(_session_id, {
                     "cycles_completed": cycle_count,
                     "total_profit_sol": state.get("total_profit_sol", 0) if state else 0,
-                    "wallet_balance_sol": (state.get("wallet_balance_sol") or state.get("simulated_balance_sol", 0)) if state else 0,
+                    "wallet_balance_sol": state.get("wallet_balance_sol", 0) if state else 0,
                 })
             except Exception as _ee:
                 logger.debug(f"end_session skipped: {_ee}")

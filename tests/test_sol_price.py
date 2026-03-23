@@ -2,8 +2,9 @@
 """
 Tests for src/data/sol_price.py
 
-All HTTP calls to CoinGecko are mocked.
-Caching logic is tested by manipulating the module-level _CACHE dict.
+One real API call test verifies the CoinGecko integration end-to-end.
+The remaining tests exercise caching and error-handling logic with controlled
+mock responses (these test the cache algorithm, not the market price itself).
 """
 import time
 import pytest
@@ -11,7 +12,7 @@ from unittest.mock import patch, MagicMock
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helpers
+# Cache helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _reset_cache():
@@ -27,7 +28,21 @@ def _set_cache(price: float, age_seconds: float = 0.0):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# get_sol_price_usd()
+# Real CoinGecko API test (one network call per run)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_real_sol_price_is_positive():
+    """CoinGecko must return a real SOL price > 0."""
+    _reset_cache()
+    from src.data.sol_price import get_sol_price_usd
+    price = get_sol_price_usd()
+    assert isinstance(price, float)
+    assert price > 0.0
+    _reset_cache()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# get_sol_price_usd() — caching and error-handling logic
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestGetSolPriceUsd:
@@ -60,7 +75,7 @@ class TestGetSolPriceUsd:
 
     def test_uses_cache_when_fresh(self):
         """Second call within 60s must NOT hit the network."""
-        _set_cache(price=120.0, age_seconds=5)  # 5s old — still fresh
+        _set_cache(price=120.0, age_seconds=5)
         with patch("requests.get") as mock_get:
             from src.data.sol_price import get_sol_price_usd
             price = get_sol_price_usd()
@@ -69,7 +84,7 @@ class TestGetSolPriceUsd:
 
     def test_refetches_when_cache_stale(self):
         """Cache older than 60s must trigger a new HTTP call."""
-        _set_cache(price=100.0, age_seconds=65)  # stale
+        _set_cache(price=100.0, age_seconds=65)
         with patch("requests.get", return_value=self._mock_coingecko(200.0)) as mock_get:
             from src.data.sol_price import get_sol_price_usd
             price = get_sol_price_usd()
@@ -77,12 +92,12 @@ class TestGetSolPriceUsd:
         assert price == 200.0
 
     def test_returns_stale_cache_when_api_fails(self):
-        """If the API call fails, return the last known price (may be None)."""
-        _set_cache(price=130.0, age_seconds=65)  # stale cache
+        """If the API call fails, return the last known price."""
+        _set_cache(price=130.0, age_seconds=65)
         with patch("requests.get", side_effect=Exception("timeout")):
             from src.data.sol_price import get_sol_price_usd
             price = get_sol_price_usd()
-        assert price == 130.0  # returns stale value
+        assert price == 130.0
 
     def test_returns_none_when_no_cache_and_api_fails(self):
         _reset_cache()
@@ -97,19 +112,18 @@ class TestGetSolPriceUsd:
         with patch("requests.get", return_value=mock_resp):
             from src.data.sol_price import get_sol_price_usd
             price = get_sol_price_usd()
-        assert price is None  # no stale cache, no price
+        assert price is None
 
     def test_handles_malformed_json(self):
         mock_resp = MagicMock()
         mock_resp.raise_for_status = MagicMock()
-        mock_resp.json.return_value = {}  # missing "solana" key
+        mock_resp.json.return_value = {}
         with patch("requests.get", return_value=mock_resp):
             from src.data.sol_price import get_sol_price_usd
             price = get_sol_price_usd()
-        assert price is None  # KeyError caught → returns stale cache (None)
+        assert price is None
 
     def test_price_is_float_not_string(self):
-        """CoinGecko returns numbers; function must return float."""
         with patch("requests.get", return_value=self._mock_coingecko(155.55)):
             from src.data.sol_price import get_sol_price_usd
             price = get_sol_price_usd()

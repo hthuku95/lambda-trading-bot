@@ -2,8 +2,8 @@
 """
 Social Intelligence API Integration - PURE DATA COLLECTION ONLY
 Collects on-chain social signals from DexScreener.
-TweetScout has been deprecated pending replacement — stubs returned for its fields.
 ZERO hardcoded judgment logic - AI agent makes all assessments.
+TweetScout has been removed. No stub/deprecated fields are returned.
 """
 import os
 import requests
@@ -24,14 +24,12 @@ class SocialIntelligenceClient:
     """Social Intelligence Client - Pure Data Collection Only"""
 
     def __init__(self):
-        logger.info("Social Intelligence client initialized (DexScreener social only — TweetScout deprecated)")
+        logger.info("Social Intelligence client initialized (DexScreener social data)")
 
     def check_api_health(self) -> Dict[str, Any]:
         """Check social intelligence health"""
         return {
             "healthy": True,
-            "tweetscout_available": False,
-            "tweetscout_status": "deprecated",
             "dexscreener_social": True,
             "timestamp": datetime.now().isoformat()
         }
@@ -72,16 +70,10 @@ class SocialIntelligenceClient:
                 "data_sources_attempted": data_sources_attempted,
                 "data_sources_successful": data_sources_successful,
 
-                # TweetScout — deprecated, stubs returned so AI knows there is no data
-                "tweetscout_accounts": {"status": "deprecated", "accounts_found": [], "total_accounts": 0},
-                "tweetscout_tweets": {"status": "deprecated", "tweets_data": [], "total_keyword_searches": 0},
-                "tweetscout_search_results": {"status": "deprecated", "search_results": [], "total_searches": 0},
-
                 # DexScreener social signals (active)
                 "dexscreener_social": dexscreener_social,
 
                 "errors": [],
-                "warnings": ["TweetScout deprecated — social scoring based on DexScreener signals only"]
             }
 
             cache_data(cache_key, raw_data, ttl_seconds=600)
@@ -123,12 +115,8 @@ class SocialIntelligenceClient:
             "data_collection_timestamp": datetime.now().isoformat(),
             "data_sources_attempted": ["dexscreener_social"],
             "data_sources_successful": [],
-            "tweetscout_accounts": {"status": "deprecated", "accounts_found": [], "total_accounts": 0},
-            "tweetscout_tweets": {"status": "deprecated", "tweets_data": [], "total_keyword_searches": 0},
-            "tweetscout_search_results": {"status": "deprecated", "search_results": [], "total_searches": 0},
             "dexscreener_social": {"error": error_msg or "Collection failed", "social_indicators": {}},
             "errors": [error_msg] if error_msg else [],
-            "warnings": ["No social data available", "TweetScout deprecated"]
         }
 
 # Initialize global client
@@ -145,12 +133,8 @@ def check_social_intelligence_health() -> Dict[str, Any]:
 def get_social_intelligence_capabilities() -> Dict[str, bool]:
     """Get social intelligence capabilities - compatibility function"""
     return {
-        "social_data_collection": True,   # DexScreener social links
-        "account_analysis": False,         # TweetScout deprecated
-        "tweet_collection": False,         # TweetScout deprecated
-        "search_functionality": False,     # TweetScout deprecated
+        "social_data_collection": True,
         "api_available": True,
-        "tweetscout_available": False,
         "dexscreener_social": True,
         "raw_data_only": True,
         "requires_ai_analysis": True

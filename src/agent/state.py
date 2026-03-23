@@ -215,7 +215,6 @@ class AgentState(TypedDict):
     # ============================================================================
     wallet_balance_sol: float      # Current SOL balance
     wallet_balance_usd: float      # Current USD equivalent balance
-    simulated_balance_sol: float   # Virtual balance for dry-run/sandbox — separate from real wallet
     active_positions: List[Position]       # Currently held positions
     total_portfolio_value_sol: float       # Total portfolio value in SOL
     total_portfolio_value_usd: float       # Total portfolio value in USD
@@ -314,7 +313,6 @@ class AgentState(TypedDict):
     
     # API and service status
     rugcheck_status: Dict[str, Any]      # RugCheck API status
-    tweetscout_status: Dict[str, Any]    # TweetScout API status
     dexscreener_status: Dict[str, Any]   # DexScreener API status
     solana_rpc_status: Dict[str, Any]    # Solana RPC status
     vector_store_status: Dict[str, Any]  # Vector store status
@@ -346,7 +344,6 @@ def create_initial_state() -> AgentState:
         # Portfolio state
         wallet_balance_sol=wallet_balance,
         wallet_balance_usd=0.0,  # Will be calculated
-        simulated_balance_sol=float(os.getenv("SANDBOX_INITIAL_BALANCE_SOL", "10.0")),
         active_positions=[],
         total_portfolio_value_sol=wallet_balance,
         total_portfolio_value_usd=0.0,
@@ -445,7 +442,6 @@ def create_initial_state() -> AgentState:
         data_source_status={},
         execution_status={"status": "ready"},
         rugcheck_status={},
-        tweetscout_status={},
         dexscreener_status={},
         solana_rpc_status={},
         vector_store_status={},
@@ -566,7 +562,6 @@ def save_agent_state(state: AgentState, filename: str = None) -> bool:
             serializable_state = {
                 # Core portfolio data
                 "wallet_balance_sol": state.get("wallet_balance_sol", 0),
-                "simulated_balance_sol": state.get("simulated_balance_sol", 10.0),
                 "active_positions": state.get("active_positions", []),
                 "transaction_history": state.get("transaction_history", []),
                 

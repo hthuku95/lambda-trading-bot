@@ -53,8 +53,6 @@ services:
         value: "300"
       - key: RISK_TOLERANCE
         value: "high"
-      - key: SANDBOX_INITIAL_BALANCE_SOL
-        value: "10.0"
       - key: SESSION_TIMEOUT_HOURS
         value: "8"
       - key: MAX_LOGIN_ATTEMPTS
@@ -125,8 +123,6 @@ services:
         value: "lambda_trading_bot"
       - key: MAX_POSITION_SIZE_SOL
         value: "0.1"
-      - key: SANDBOX_INITIAL_BALANCE_SOL
-        value: "10.0"
       - key: SESSION_TIMEOUT_HOURS
         value: "8"
       - key: MAX_LOGIN_ATTEMPTS

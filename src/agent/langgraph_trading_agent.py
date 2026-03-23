@@ -51,9 +51,8 @@ logger = logging.getLogger("trading_agent.langgraph")
 # Module-level model provider tracker (updated by CompleteLangGraphTradingAgent on init)
 _current_model_provider = "gemini"
 
-# Module-level sandbox state — set at start of each cycle, updated by tools during cycle
+# Module-level trading mode tracker — set at start of each cycle
 _current_trading_mode: str = "dry_run"
-_current_simulated_balance: float = 10.0
 
 # ============================================================================
 # Agent State Definition for Custom Graph
@@ -69,19 +68,15 @@ class TradingAgentState(TypedDict):
 # WALLET AND PORTFOLIO TOOLS
 @tool
 def get_wallet_balance_tool() -> Dict[str, Any]:
-    """Get current SOL wallet balance"""
-    global _current_trading_mode, _current_simulated_balance
+    """Get current SOL wallet balance from the configured Solana wallet"""
     try:
-        if _current_trading_mode == "dry_run":
-            return {
-                "success": True,
-                "balance_sol": round(_current_simulated_balance, 6),
-                "simulated": True,
-                "note": "Sandbox balance — no real funds involved",
-                "timestamp": datetime.now().isoformat()
-            }
         balance = get_wallet_balance()
-        return {"success": True, "balance_sol": balance, "simulated": False, "timestamp": datetime.now().isoformat()}
+        return {
+            "success": True,
+            "balance_sol": balance,
+            "trading_mode": _current_trading_mode,
+            "timestamp": datetime.now().isoformat()
+        }
     except Exception as e:
         logger.error(f"Wallet balance error: {e}")
         return {"success": False, "error": str(e)}
@@ -482,26 +477,19 @@ def execute_trade_tool(
             amount_sol = max_position_sol
 
         if dry_run:
-            # Update simulated balance
-            global _current_simulated_balance
-            if trade_type == "buy":
-                _current_simulated_balance = max(0.0, _current_simulated_balance - amount_sol)
-            elif trade_type in ("sell", "partial_sell"):
-                _current_simulated_balance += amount_sol
-
+            # Build real transaction from the real Jupiter quote but do NOT submit to chain
+            if not quote_data:
+                return {"success": False, "error": "No quote data provided for dry-run transaction build"}
+            transaction = get_swap_transaction(quote_data, str(user_pubkey))
             return {
                 "success": True,
-                "message": f"[DRY RUN] {trade_type.upper()} {amount_sol:.4f} SOL of {token_address}",
+                "message": f"[DRY RUN] {trade_type.upper()} {amount_sol:.4f} SOL of {token_address} — transaction built, not submitted",
                 "trade_type": trade_type,
                 "token_address": token_address,
                 "amount_sol": amount_sol,
                 "dry_run": True,
+                "transaction_ready": transaction is not None,
                 "reasoning": reasoning,
-                "simulated_balance_after": round(_current_simulated_balance, 6),
-                "simulated_result": {
-                    "transaction_id": f"dry_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-                    "status": "simulated_success"
-                },
                 "timestamp": datetime.now().isoformat()
             }
         else:
@@ -1053,17 +1041,10 @@ class CompleteLangGraphTradingAgent:
         
         state = update_portfolio_metrics(state)
 
-        # Load/sync sandbox balance for dry-run mode
-        global _current_trading_mode, _current_simulated_balance
+        # Set current trading mode for tools
+        global _current_trading_mode
         trading_mode = state.get("trading_mode", "dry_run")
         _current_trading_mode = trading_mode
-        if trading_mode == "dry_run":
-            _current_simulated_balance = state.get(
-                "simulated_balance_sol",
-                float(os.getenv("SANDBOX_INITIAL_BALANCE_SOL", "10.0"))
-            )
-            # Show simulated balance in context message, not real wallet balance
-            state["wallet_balance_sol"] = _current_simulated_balance
 
         context_message = self._create_context_message(state)
         cycles = state.get("cycles_completed", 0)
@@ -1111,11 +1092,6 @@ class CompleteLangGraphTradingAgent:
             for tool_call in msg.tool_calls
         ]
         final_agent_state["tools_used_this_cycle"] = tools_used
-
-        # Sync simulated balance back to state so it persists across cycles
-        if trading_mode == "dry_run":
-            final_agent_state["simulated_balance_sol"] = _current_simulated_balance
-            final_agent_state["wallet_balance_sol"] = _current_simulated_balance
 
         save_agent_state(final_agent_state)
         return final_agent_state
