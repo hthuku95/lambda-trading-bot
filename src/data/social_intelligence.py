@@ -1,7 +1,7 @@
 # src/data/social_intelligence.py
 """
 Social Intelligence API Integration - PURE DATA COLLECTION ONLY
-Collects on-chain social signals from DexScreener.
+Collects on-chain social signals from DexScreener + Nansen smart money intelligence.
 ZERO hardcoded judgment logic - AI agent makes all assessments.
 TweetScout has been removed. No stub/deprecated fields are returned.
 """
@@ -24,15 +24,30 @@ class SocialIntelligenceClient:
     """Social Intelligence Client - Pure Data Collection Only"""
 
     def __init__(self):
-        logger.info("Social Intelligence client initialized (DexScreener social data)")
+        try:
+            from src.data.nansen_client import _is_available as nansen_available
+            _nansen = nansen_available()
+        except Exception:
+            _nansen = False
+        sources = ["DexScreener"] + (["Nansen"] if _nansen else [])
+        logger.info(f"Social Intelligence client initialized (sources: {', '.join(sources)})")
 
     def check_api_health(self) -> Dict[str, Any]:
         """Check social intelligence health"""
-        return {
+        health: Dict[str, Any] = {
             "healthy": True,
             "dexscreener_social": True,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
         }
+        try:
+            from src.data.nansen_client import check_nansen_health
+            nansen_health = check_nansen_health()
+            health["nansen"] = nansen_health.get("healthy", False)
+            health["nansen_detail"] = nansen_health
+        except Exception as e:
+            health["nansen"] = False
+            health["nansen_detail"] = {"error": str(e)}
+        return health
 
     def get_token_social_data_raw(self, token_address: str, token_symbol: str = None) -> Dict[str, Any]:
         """
@@ -56,12 +71,23 @@ class SocialIntelligenceClient:
                     logger.warning(f"Could not determine symbol for token {token_address}")
                     return self._get_empty_social_data(token_address)
 
-            data_sources_attempted = ["dexscreener_social"]
+            data_sources_attempted = ["dexscreener_social", "nansen"]
             data_sources_successful = []
 
             dexscreener_social = self._get_dexscreener_social_raw(pairs_data)
             if not dexscreener_social.get("error"):
                 data_sources_successful.append("dexscreener_social")
+
+            # Nansen smart money intelligence
+            nansen_signal: Dict[str, Any] = {}
+            try:
+                from src.data.nansen_client import get_full_nansen_signal
+                nansen_signal = get_full_nansen_signal(token_address, token_symbol or "")
+                if nansen_signal.get("available"):
+                    data_sources_successful.append("nansen")
+            except Exception as ne:
+                logger.debug(f"Nansen signal skipped for {token_address[:8]}...: {ne}")
+                nansen_signal = {"available": False, "reason": str(ne)}
 
             raw_data = {
                 "token_address": token_address,
@@ -70,8 +96,11 @@ class SocialIntelligenceClient:
                 "data_sources_attempted": data_sources_attempted,
                 "data_sources_successful": data_sources_successful,
 
-                # DexScreener social signals (active)
+                # DexScreener social signals (website/twitter/telegram links, boosts)
                 "dexscreener_social": dexscreener_social,
+
+                # Nansen smart money intelligence
+                "nansen_signal": nansen_signal,
 
                 "errors": [],
             }
@@ -113,9 +142,10 @@ class SocialIntelligenceClient:
             "token_address": token_address,
             "token_symbol": None,
             "data_collection_timestamp": datetime.now().isoformat(),
-            "data_sources_attempted": ["dexscreener_social"],
+            "data_sources_attempted": ["dexscreener_social", "nansen"],
             "data_sources_successful": [],
             "dexscreener_social": {"error": error_msg or "Collection failed", "social_indicators": {}},
+            "nansen_signal": {"available": False, "reason": error_msg or "Collection failed"},
             "errors": [error_msg] if error_msg else [],
         }
 

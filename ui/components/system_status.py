@@ -60,6 +60,24 @@ def render_api_health_status(data):
             error_msg = social_health.get('error', 'Unknown error')
             st.write(f"**Error:** {error_msg}")
     
+    # Nansen section
+    st.write("**Nansen Smart Money API**")
+    try:
+        from src.data.nansen_client import check_nansen_health
+        nansen = check_nansen_health()
+        if nansen.get("healthy"):
+            st.success("🟢 Online")
+        else:
+            reason = nansen.get("reason", "unavailable")
+            if "not set" in reason:
+                st.info(f"⚪ Not configured — set NANSEN_API_KEY to enable smart money signals")
+            elif "credits" in reason.lower():
+                st.warning(f"🟡 Credits depleted — resets on plan cycle")
+            else:
+                st.warning(f"🟡 {reason}")
+    except Exception as e:
+        st.info("⚪ Nansen not configured")
+
     # Overall system capabilities
     st.write("---")
     st.write("**System Capabilities**")

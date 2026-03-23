@@ -27,7 +27,10 @@ from ui.components import (
     render_tokens_tab,
     render_trading_history_tab,
     render_insights_tab,
-    render_system_status_tab
+    render_system_status_tab,
+    render_backtesting_tab,
+    render_approvals_tab,
+    render_approval_banner,
 )
 
 def main():
@@ -82,19 +85,24 @@ def main():
     
     # Render summary metrics cards
     render_summary_cards(data)
-    
+
+    # Always-visible approval banner (shows only when a trade is pending)
+    render_approval_banner()
+
     # Render performance overview section
     if data.get('agent_state'):
         render_performance_overview(data['agent_state'])
     
     # Create main dashboard tabs
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "📈 Portfolio",
         "🔍 Token Analysis",
         "📊 Trading History",
         "🧠 Agent Insights",
         "💬 Chat with Agents",
-        "⚙️ System Status"
+        "⚙️ System Status",
+        "📊 Backtesting",
+        "🔔 Approvals",
     ])
 
     # Render each tab content
@@ -117,7 +125,13 @@ def main():
 
     with tab6:
         render_system_status_tab(data)
-    
+
+    with tab7:
+        render_backtesting_tab(data)
+
+    with tab8:
+        render_approvals_tab(data)
+
     # Auto-refresh when agent is running (non-blocking)
     if st.session_state.get('agent_running', False):
         st.markdown(

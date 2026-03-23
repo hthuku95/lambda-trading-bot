@@ -10,7 +10,7 @@ import logging
 import time
 import operator
 from typing import Dict, Any, List, Optional, TypedDict, Annotated
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from langchain_core.messages import BaseMessage
 
@@ -299,7 +299,10 @@ def get_safety_data_tool(token_address: str) -> Dict[str, Any]:
 @tool
 def get_social_data_tool(token_address: str, token_symbol: str) -> Dict[str, Any]:
     """
-    Get raw social data from TweetScout
+    Get raw social data (DexScreener social links + Nansen smart money signals).
+
+    Returns DexScreener social links (Twitter/Telegram/website) AND Nansen
+    smart money intelligence (holder count, flow direction, recent trades).
 
     Args:
         token_address: Token mint address
@@ -317,6 +320,77 @@ def get_social_data_tool(token_address: str, token_symbol: str) -> Dict[str, Any
     except Exception as e:
         logger.error(f"Social data error: {e}")
         return {"success": False, "error": str(e), "token_address": token_address}
+
+
+@tool
+def get_nansen_smart_money_tool(
+    token_address: str,
+    token_symbol: str = "",
+) -> Dict[str, Any]:
+    """
+    Get Nansen smart money intelligence for a specific token.
+
+    Returns a rich signal combining:
+    - smart_money_holder_count: How many tracked smart wallets hold this token
+    - smart_money_total_value_usd: Total USD value held by smart money
+    - smart_trader_net_flow_usd: Net smart trader flow (positive = accumulating)
+    - whale_net_flow_usd: Net whale flow (positive = accumulating)
+    - smart_money_accumulating: True if combined flow is positive
+    - sm_buys_last_6h / sm_sells_last_6h: Smart money trade counts
+    - sm_buy_pressure: Fraction of smart money trades that are buys (0-1)
+    - nansen_indicators: Risk/reward indicator scores
+    - token_information: Social links, market metadata from Nansen
+
+    Use this before executing trades to confirm smart money conviction.
+    High sm_buy_pressure + positive net_flow = strong signal.
+
+    Args:
+        token_address: Solana token mint address
+        token_symbol: Token symbol (optional, for logging)
+    """
+    try:
+        from src.data.nansen_client import get_full_nansen_signal
+        signal = get_full_nansen_signal(token_address, token_symbol)
+        out = str(signal)
+        return out[:4000] + "\n...[truncated]" if len(out) > 4000 else out
+    except Exception as e:
+        logger.error(f"get_nansen_smart_money_tool error: {e}")
+        return str({"success": False, "error": str(e), "token_address": token_address})
+
+
+@tool
+def screen_nansen_opportunities_tool(
+    timeframe: str = "1h",
+) -> str:
+    """
+    Screen Solana tokens with active smart money buying via Nansen.
+
+    Returns up to 50 tokens sorted by smart money buy_volume DESC.
+    Each token has: token_address, token_symbol, market_cap_usd, liquidity,
+    price_change, buy_volume, sell_volume, netflow, nof_traders, token_age_days.
+
+    Use this early in a trading cycle to find tokens already attracting
+    smart money attention before they become mainstream news.
+
+    Args:
+        timeframe: One of 5m, 1h, 6h, 24h, 7d (default: 1h)
+    """
+    try:
+        from src.data.nansen_client import screen_smart_money_tokens
+        tokens = screen_smart_money_tokens(timeframe=timeframe, per_page=50)
+        result = {
+            "success": True,
+            "timeframe": timeframe,
+            "count": len(tokens),
+            "tokens": tokens,
+            "timestamp": datetime.now().isoformat(),
+        }
+        out = str(result)
+        return out[:4000] + "\n...[truncated]" if len(out) > 4000 else out
+    except Exception as e:
+        logger.error(f"screen_nansen_opportunities_tool error: {e}")
+        return str({"success": False, "error": str(e)})
+
 
 # ANALYSIS AND MEMORY TOOLS
 @tool
@@ -446,6 +520,132 @@ def get_swap_quote_tool(
         logger.error(f"Swap quote error: {e}")
         return {"success": False, "error": str(e)}
 
+# ─────────────────────────────────────────────────────────────────────────────
+# HUMAN-IN-THE-LOOP APPROVAL SYSTEM
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PROJECT_ROOT  = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_APPROVAL_FILE = os.path.join(_PROJECT_ROOT, "trade_approvals.json")
+_PENDING_FILE  = os.path.join(_PROJECT_ROOT, "trade_pending_approval.json")
+
+
+def _write_pending_approval(
+    trade_id: str,
+    trade_type: str,
+    token_address: str,
+    amount_sol: float,
+    reasoning: str,
+    threshold_sol: float,
+    expires_at: str,
+) -> None:
+    """Write a pending trade to disk so the dashboard can surface it."""
+    import json as _json
+    pending = {
+        "trade_id": trade_id,
+        "trade_type": trade_type,
+        "token_address": token_address,
+        "amount_sol": amount_sol,
+        "reasoning": reasoning,
+        "threshold_sol": threshold_sol,
+        "requested_at": datetime.now().isoformat(),
+        "expires_at": expires_at,
+        "status": "pending",
+    }
+    try:
+        with open(_PENDING_FILE, "w") as f:
+            _json.dump(pending, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Could not write pending approval file: {e}")
+
+
+def _await_human_approval(
+    trade_type: str,
+    token_address: str,
+    amount_sol: float,
+    reasoning: str,
+    threshold_sol: float,
+) -> tuple[bool, float]:
+    """
+    Wait up to HUMAN_APPROVAL_TIMEOUT_MINUTES for a human to approve a large
+    trade by writing to trade_approvals.json.
+
+    Returns (approved: bool, final_amount_sol: float).
+    If approved: returns (True, approved_amount).
+    If timed out: returns (False, amount_sol) — caller caps the amount.
+
+    The approval file schema expected from the dashboard:
+        {
+          "trade_id": "<uuid>",
+          "approved": true,
+          "amount_sol": 4.5,       # operator can reduce the amount
+          "approved_at": "..."
+        }
+    """
+    import json as _json
+    import uuid as _uuid
+
+    timeout_minutes = int(os.getenv("HUMAN_APPROVAL_TIMEOUT_MINUTES", "60"))
+    poll_interval   = 10  # seconds between file checks
+    trade_id = str(_uuid.uuid4())[:12]
+    expires_at = (
+        datetime.now() + timedelta(minutes=timeout_minutes)
+    ).isoformat()
+
+    logger.warning(
+        f"🔔 LARGE TRADE REQUIRES APPROVAL: {trade_type.upper()} {amount_sol:.2f} SOL "
+        f"of {token_address[:8]}... (threshold {threshold_sol:.1f} SOL). "
+        f"trade_id={trade_id}  expires={expires_at}"
+    )
+    _write_pending_approval(
+        trade_id, trade_type, token_address, amount_sol, reasoning, threshold_sol, expires_at
+    )
+
+    deadline = datetime.now() + timedelta(minutes=timeout_minutes)
+    while datetime.now() < deadline:
+        time.sleep(poll_interval)
+        try:
+            if not os.path.exists(_APPROVAL_FILE):
+                continue
+            with open(_APPROVAL_FILE) as f:
+                data = _json.load(f)
+            if data.get("trade_id") != trade_id:
+                continue
+            if data.get("approved"):
+                approved_amount = float(data.get("amount_sol", amount_sol))
+                logger.info(
+                    f"✅ Trade {trade_id} approved by operator "
+                    f"({approved_amount:.2f} SOL)"
+                )
+                # Clean up files
+                for path in (_APPROVAL_FILE, _PENDING_FILE):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                return True, approved_amount
+            else:
+                # Explicit rejection
+                logger.info(f"❌ Trade {trade_id} rejected by operator")
+                for path in (_APPROVAL_FILE, _PENDING_FILE):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                return False, amount_sol
+        except Exception:
+            continue
+
+    # Timeout — clean up pending file
+    try:
+        os.remove(_PENDING_FILE)
+    except OSError:
+        pass
+    logger.info(
+        f"⏰ Trade {trade_id} approval timed out after {timeout_minutes}min"
+    )
+    return False, amount_sol
+
+
 class ExecuteTradeInput(BaseModel):
     trade_type: str = Field(description="Type of trade to execute (buy/sell)")
     token_address: str = Field(description="Token mint address")
@@ -475,6 +675,32 @@ def execute_trade_tool(
         if amount_sol > max_position_sol:
             logger.warning(f"Trade amount {amount_sol} SOL exceeds max {max_position_sol} SOL — capping")
             amount_sol = max_position_sol
+
+        # Human-in-the-loop gate for large live trades
+        # Trades >= HUMAN_APPROVAL_THRESHOLD_SOL (default 5.0) require explicit
+        # approval written to trade_approvals.json by the dashboard or operator.
+        # If no approval arrives within HUMAN_APPROVAL_TIMEOUT_MINUTES the trade
+        # is capped at (threshold - 0.1) SOL and proceeds automatically so the
+        # daemon never stalls during unattended 24/7 operation.
+        if not dry_run:
+            threshold_sol = float(os.getenv("HUMAN_APPROVAL_THRESHOLD_SOL", "5.0"))
+            if amount_sol >= threshold_sol:
+                approved, final_amount = _await_human_approval(
+                    trade_type=trade_type,
+                    token_address=token_address,
+                    amount_sol=amount_sol,
+                    reasoning=reasoning,
+                    threshold_sol=threshold_sol,
+                )
+                if not approved:
+                    # Auto-proceed at just-below threshold after timeout
+                    amount_sol = threshold_sol - 0.1
+                    logger.info(
+                        f"Human approval timeout — proceeding with capped amount "
+                        f"{amount_sol:.2f} SOL (threshold {threshold_sol:.1f} SOL)"
+                    )
+                else:
+                    amount_sol = final_amount  # operator may have adjusted amount
 
         if dry_run:
             # Build real transaction from the real Jupiter quote but do NOT submit to chain
@@ -791,12 +1017,59 @@ def run_strategy_backtest_tool(
         # Store each trade in AstraDB for learning
         if result.trade_log:
             try:
-                for trade in result.trade_log[:20]:  # limit to 20 per run
+                for trade in result.trade_log:
                     trade["model_provider"] = _current_model_provider
                     trade["ai_reasoning"] = f"Backtest {strategy_name}: {result.total_return_pct:.1f}% total return"
                     add_trading_experience(token_address, trade)
             except Exception as mem_err:
                 logger.debug(f"AstraDB trade log save failed: {mem_err}")
+
+        # Gap 6: Share profitable backtest insights with the other model's collection
+        if result.num_trades > 0 and result.total_return_pct > 0 and result.win_rate > 0.5:
+            try:
+                from src.memory.astra_vector_store import share_insight_across_models
+                share_insight_across_models(
+                    insight={
+                        "strategy": strategy_name,
+                        "success_rate": result.win_rate * 100,
+                        "pattern_description": (
+                            f"{strategy_name} strategy on {token_address[:8]}...: "
+                            f"{result.total_return_pct:.1f}% return, "
+                            f"{result.win_rate:.0%} win rate over {days_back}d"
+                        ),
+                        "market_conditions": f"{len(candles)} candles, {days_back}d backtest window",
+                        "confidence_score": min(result.sharpe_ratio / 2.0, 1.0),
+                        "token_characteristics": {
+                            "token_address": token_address,
+                            "total_return_pct": result.total_return_pct,
+                            "num_trades": result.num_trades,
+                            "avg_hold_minutes": result.avg_hold_minutes,
+                            "sharpe_ratio": result.sharpe_ratio,
+                        },
+                        "risk_factors": [f"max_drawdown: {result.max_drawdown_pct:.1f}%"],
+                        "success_factors": [
+                            f"sharpe: {result.sharpe_ratio:.2f}",
+                            f"win_rate: {result.win_rate:.0%}",
+                            f"best_trade: {result.best_trade_pct:.1f}%",
+                        ],
+                        "recommendations": (
+                            f"Consider {strategy_name} strategy on tokens with similar profiles"
+                        ),
+                        "detailed_analysis": (
+                            f"Run {run_id}: {result.num_trades} trades, "
+                            f"best {result.best_trade_pct:.1f}%, worst {result.worst_trade_pct:.1f}%, "
+                            f"avg hold {result.avg_hold_minutes:.0f}min"
+                        ),
+                        "pattern_type": "backtest_success",
+                    },
+                    source_model=_current_model_provider,
+                )
+                logger.debug(
+                    f"Backtest insight shared across models: {strategy_name} "
+                    f"{result.total_return_pct:.1f}% on {token_address[:8]}..."
+                )
+            except Exception as share_err:
+                logger.debug(f"share_insight_across_models skipped: {share_err}")
 
         summary = {
             "success": True,
@@ -993,7 +1266,9 @@ class CompleteLangGraphTradingAgent:
         return [
             get_wallet_balance_tool, get_portfolio_summary_tool, discover_tokens_tool,
             filter_tokens_tool, sort_tokens_tool, get_comprehensive_token_data_tool,
-            get_safety_data_tool, get_social_data_tool, search_trading_history_tool,
+            get_safety_data_tool, get_social_data_tool,
+            get_nansen_smart_money_tool, screen_nansen_opportunities_tool,
+            search_trading_history_tool,
             find_similar_tokens_tool, get_trading_patterns_tool, get_swap_quote_tool,
             execute_trade_tool, save_trading_experience_tool, check_system_status_tool,
             get_market_overview_tool,
@@ -1075,10 +1350,30 @@ class CompleteLangGraphTradingAgent:
             "agent_state": state
         }
 
-        final_state_graph = self.graph.invoke(
-            graph_initial_state,
-            config=config
-        )
+        # Wrap graph.invoke() with collect_runs to capture the LangSmith run ID
+        _langsmith_run_id = None
+        if os.getenv("LANGCHAIN_API_KEY"):
+            try:
+                from langchain_core.tracers.context import collect_runs
+                with collect_runs() as cb:
+                    final_state_graph = self.graph.invoke(
+                        graph_initial_state,
+                        config=config
+                    )
+                if cb.traced_runs:
+                    _langsmith_run_id = str(cb.traced_runs[0].id)
+                    logger.debug(f"LangSmith run ID captured: {_langsmith_run_id}")
+            except Exception as _ls_err:
+                logger.debug(f"collect_runs unavailable, falling back: {_ls_err}")
+                final_state_graph = self.graph.invoke(
+                    graph_initial_state,
+                    config=config
+                )
+        else:
+            final_state_graph = self.graph.invoke(
+                graph_initial_state,
+                config=config
+            )
 
         # Extract and save the final state from the graph's state
         final_agent_state = final_state_graph['agent_state']
@@ -1097,6 +1392,10 @@ class CompleteLangGraphTradingAgent:
             for tool_call in msg.tool_calls
         ]
         final_agent_state["tools_used_this_cycle"] = tools_used
+
+        # Store the LangSmith run ID for this cycle so _persist_cycle_trades can attach it
+        if _langsmith_run_id:
+            final_agent_state["last_cycle_langsmith_run_id"] = _langsmith_run_id
 
         # Persist every execute_trade_tool result to PostgreSQL + AstraDB
         self._persist_cycle_trades(
@@ -1166,6 +1465,23 @@ class CompleteLangGraphTradingAgent:
                 if len(history) > 200:
                     final_state["transaction_history"] = history[-200:]
 
+                # ── 1b. Dry-run balance simulation ──────────────────────────
+                # Update wallet_balance_sol so the agent sees the effect of
+                # its own dry-run decisions within a single cycle.
+                if trade_result.get("dry_run") and trade_result.get("success"):
+                    amount = trade_result.get("amount_sol", 0)
+                    trade_type = trade_result.get("trade_type", "").lower()
+                    current_bal = final_state.get("wallet_balance_sol", 0)
+                    if trade_type == "buy":
+                        final_state["wallet_balance_sol"] = max(0.0, current_bal - amount)
+                    elif trade_type == "sell":
+                        final_state["wallet_balance_sol"] = current_bal + amount
+                    logger.debug(
+                        f"Dry-run balance updated: {current_bal:.4f} → "
+                        f"{final_state['wallet_balance_sol']:.4f} SOL "
+                        f"({trade_type} {amount:.4f} SOL)"
+                    )
+
                 # ── 2. PostgreSQL ────────────────────────────────────────────
                 if session_id:
                     try:
@@ -1210,6 +1526,129 @@ class CompleteLangGraphTradingAgent:
                         )
                     except Exception as e:
                         logger.warning(f"add_trading_experience skipped: {e}")
+
+                # ── 3b. LangSmith: tag active position with this cycle's run ID ──
+                # On a successful BUY, store the run ID on the position so we can
+                # attach outcome feedback when the position is later sold.
+                if (
+                    trade_result.get("trade_type", "").lower() == "buy"
+                    and trade_result.get("success")
+                    and token_address
+                    and os.getenv("LANGCHAIN_API_KEY")
+                ):
+                    try:
+                        run_id_for_pos = final_state.get("last_cycle_langsmith_run_id")
+                        if run_id_for_pos:
+                            active_positions = final_state.get("active_positions", [])
+                            for pos in active_positions:
+                                if pos.get("token_address") == token_address:
+                                    pos["langsmith_run_id"] = run_id_for_pos
+                                    logger.debug(
+                                        f"Attached LangSmith run ID {run_id_for_pos} "
+                                        f"to position {token_address[:8]}..."
+                                    )
+                                    break
+                    except Exception as _ls_buy_err:
+                        logger.debug(f"LangSmith BUY tag skipped: {_ls_buy_err}")
+
+                # ── 4. Gaps 2 & 5: Outcome calibration on sell ──────────────
+                # When the agent closes a position (sell), record the actual
+                # P&L and compare it against any prior backtest prediction for
+                # this token. This calibration is stored in AstraDB so agents
+                # can learn how accurate their backtest predictions really are.
+                if (
+                    trade_result.get("trade_type", "").lower() == "sell"
+                    and trade_result.get("success")
+                    and token_address
+                ):
+                    try:
+                        # Find the matching open position for P&L calculation
+                        active_positions = final_state.get("active_positions", [])
+                        matching_pos = next(
+                            (p for p in active_positions
+                             if p.get("token_address") == token_address),
+                            None,
+                        )
+                        entry_price = matching_pos.get("entry_price_usd", 0) if matching_pos else 0
+                        current_price = matching_pos.get("current_price_usd", 0) if matching_pos else 0
+                        actual_profit_pct = (
+                            ((current_price - entry_price) / entry_price * 100)
+                            if entry_price else 0
+                        )
+
+                        # ── LangSmith outcome feedback ───────────────────────
+                        if os.getenv("LANGCHAIN_API_KEY") and matching_pos:
+                            try:
+                                _ls_run_id = matching_pos.get("langsmith_run_id")
+                                if _ls_run_id:
+                                    from langsmith import Client as LangSmithClient
+                                    ls_client = LangSmithClient()
+                                    ls_client.create_feedback(
+                                        run_id=_ls_run_id,
+                                        key="trade_outcome",
+                                        score=actual_profit_pct / 100,
+                                        value=f"{'profit' if actual_profit_pct > 0 else 'loss'}: {actual_profit_pct:.1f}%",
+                                        comment=(
+                                            f"Position held {matching_pos.get('hold_time_hours', 0):.1f}h. "
+                                            f"Entry {matching_pos.get('entry_price_usd', 0):.6f} → "
+                                            f"Exit {matching_pos.get('current_price_usd', 0):.6f} USD"
+                                        ),
+                                    )
+                                    logger.info(
+                                        f"LangSmith feedback submitted: run={_ls_run_id[:8]}... "
+                                        f"score={actual_profit_pct / 100:.3f} "
+                                        f"({'profit' if actual_profit_pct > 0 else 'loss'})"
+                                    )
+                            except Exception as _ls_fb_err:
+                                logger.debug(f"LangSmith feedback skipped: {_ls_fb_err}")
+
+                        # Look up backtest predictions for this token
+                        from src.db.backtest_store import get_best_strategy_for_token
+                        backtest_strategies = get_best_strategy_for_token(
+                            token_address, self.model_provider
+                        )
+                        best_bt = backtest_strategies[0] if backtest_strategies else None
+                        bt_predicted = best_bt["avg_return_pct"] if best_bt else None
+                        prediction_error = (
+                            actual_profit_pct - bt_predicted
+                            if bt_predicted is not None else None
+                        )
+
+                        calibration = {
+                            "model_provider": self.model_provider,
+                            "trade_type": "outcome_calibration",
+                            "token_symbol": (
+                                matching_pos.get("token_symbol", "")
+                                if matching_pos else ""
+                            ),
+                            "actual_profit_pct": actual_profit_pct,
+                            "hold_time_hours": (
+                                matching_pos.get("hold_time_hours", 0)
+                                if matching_pos else 0
+                            ),
+                            "best_backtest_strategy": (
+                                best_bt.get("strategy_name") if best_bt else None
+                            ),
+                            "backtest_predicted_return_pct": bt_predicted,
+                            "prediction_error_pct": prediction_error,
+                            "was_profitable": actual_profit_pct > 0,
+                            "ai_reasoning": (
+                                f"Position closed: {actual_profit_pct:.1f}% actual"
+                                + (f" vs {bt_predicted:.1f}% backtest predicted"
+                                   if bt_predicted is not None else " (no backtest baseline)")
+                            ),
+                            "market_conditions": final_state.get("market_conditions", {}),
+                            "timestamp": trade_result.get("timestamp", datetime.now().isoformat()),
+                            "dry_run": trade_result.get("dry_run", True),
+                        }
+                        add_trading_experience(token_address, calibration)
+                        logger.info(
+                            f"Outcome calibration vectorized: {actual_profit_pct:.1f}% actual"
+                            + (f" vs {bt_predicted:.1f}% predicted (error {prediction_error:+.1f}%)"
+                               if prediction_error is not None else "")
+                        )
+                    except Exception as cal_err:
+                        logger.debug(f"Outcome calibration skipped: {cal_err}")
 
     def _create_context_message(self, state: AgentState) -> str:
         """Creates the initial prompt for the trading cycle."""

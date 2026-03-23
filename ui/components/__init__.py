@@ -9,6 +9,8 @@ from .tokens import render_tokens_tab
 from .trading_history import render_trading_history_tab
 from .insights import render_insights_tab
 from .system_status import render_system_status_tab
+from .backtesting import render_backtesting_tab
+from .approvals import render_approvals_tab, render_approval_banner
 
 __all__ = [
     'render_sidebar',
@@ -19,7 +21,10 @@ __all__ = [
     'render_tokens_tab',
     'render_trading_history_tab',
     'render_insights_tab',
-    'render_system_status_tab'
+    'render_system_status_tab',
+    'render_backtesting_tab',
+    'render_approvals_tab',
+    'render_approval_banner',
 ]
 
 # Note: bitquery_status.py has been removed as it's no longer needed

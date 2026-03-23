@@ -98,6 +98,67 @@ def _pair_monitor_loop() -> None:
     logger.info("🔭 Pair monitor thread stopped")
 
 
+def _nansen_monitor_loop() -> None:
+    """
+    Background daemon: poll Nansen token screener every 5 minutes for Solana
+    tokens with active smart money buying. Feeds addresses into _pair_queue
+    for backtesting — these are higher-quality targets than pure DexScreener
+    boosts because they represent real institutional/smart wallet conviction.
+    """
+    logger.info("💡 Nansen monitor thread started (smart money screener, 5min interval)")
+    while not _pair_monitor_stop.wait(timeout=300):
+        try:
+            from src.data.nansen_client import screen_smart_money_tokens, _is_available
+            if not _is_available():
+                logger.debug("Nansen monitor: NANSEN_API_KEY not set — skipping")
+                continue
+            tokens = screen_smart_money_tokens(timeframe="1h", per_page=50)
+            added = 0
+            for token in tokens:
+                addr = token.get("token_address")
+                if addr and not _pair_queue.full():
+                    try:
+                        _pair_queue.put_nowait(addr)
+                        added += 1
+                    except queue.Full:
+                        break
+            if added:
+                logger.info(f"Nansen monitor: queued {added} smart money tokens for backtesting")
+        except Exception as e:
+            logger.warning(f"Nansen monitor error: {e}")
+    logger.info("💡 Nansen monitor thread stopped")
+
+
+def _new_token_monitor_loop() -> None:
+    """
+    Background daemon: poll RugCheck /stats/new_tokens every 15s for freshly
+    created tokens and push them into _pair_queue for backtesting.
+    Runs at 4× the cadence of the DexScreener boosted-token poll so newly
+    launched tokens enter the backtest pipeline within seconds of discovery.
+    """
+    logger.info("🆕 New token monitor thread started (RugCheck, 15s interval)")
+    while not _pair_monitor_stop.wait(timeout=15):
+        try:
+            from src.data.rugcheck_client import RugCheckClient
+            client = RugCheckClient()
+            result = client.get_recent_tokens()
+            tokens = result.get("tokens", []) if isinstance(result, dict) else []
+            added = 0
+            for token in tokens[:30]:
+                addr = token.get("mint") or token.get("address") or token.get("token")
+                if addr and not _pair_queue.full():
+                    try:
+                        _pair_queue.put_nowait(addr)
+                        added += 1
+                    except queue.Full:
+                        break
+            if added:
+                logger.debug(f"New token monitor: queued {added} fresh tokens for backtesting")
+        except Exception as e:
+            logger.warning(f"New token monitor error: {e}")
+    logger.info("🆕 New token monitor thread stopped")
+
+
 def _backtest_worker_loop() -> None:
     """
     Background daemon: consume token addresses from _pair_queue and run
@@ -121,13 +182,45 @@ def _backtest_worker_loop() -> None:
             )
             run_id = str(_uuid.uuid4())[:12]
             saved = 0
+            vectorized = 0
             for r in results:
                 if r.num_trades > 0:
                     save_backtest_result(r, run_id=run_id, model_provider="daemon")
                     saved += 1
+                    # Vectorize into AstraDB so agents can learn from daemon backtests
+                    try:
+                        from src.memory.astra_vector_store import add_trading_experience
+                        experience = {
+                            "model_provider": "daemon",
+                            "trade_type": "backtest",
+                            "strategy_name": r.strategy_name,
+                            "token_symbol": r.token_symbol,
+                            "total_return_pct": r.total_return_pct,
+                            "win_rate": r.win_rate,
+                            "num_trades": r.num_trades,
+                            "sharpe_ratio": r.sharpe_ratio,
+                            "max_drawdown_pct": r.max_drawdown_pct,
+                            "avg_hold_minutes": r.avg_hold_minutes,
+                            "best_trade_pct": r.best_trade_pct,
+                            "worst_trade_pct": r.worst_trade_pct,
+                            "days_back": 7,
+                            "run_id": run_id,
+                            "ai_reasoning": (
+                                f"Daemon backtest {r.strategy_name} on {r.token_symbol}: "
+                                f"{r.total_return_pct:.1f}% return, "
+                                f"{r.win_rate:.0%} win rate, "
+                                f"{r.num_trades} trades"
+                            ),
+                            "timestamp": datetime.now().isoformat(),
+                        }
+                        add_trading_experience(token_address, experience)
+                        vectorized += 1
+                    except Exception as vec_err:
+                        logger.debug(f"AstraDB vectorize skipped for {token_address[:8]}...: {vec_err}")
             if saved:
                 logger.info(
-                    f"Backtest worker: saved {saved} results for {token_address[:8]}... (run {run_id})"
+                    f"Backtest worker: saved {saved} results for {token_address[:8]}... "
+                    f"(run {run_id}, {vectorized} vectorized to AstraDB)"
                 )
         except Exception as e:
             logger.error(f"Backtest worker error for {token_address}: {e}")
@@ -186,12 +279,24 @@ def run_agent_daemon():
         _monitor_thread = threading.Thread(
             target=_pair_monitor_loop, name="pair-monitor", daemon=True
         )
+        _new_token_thread = threading.Thread(
+            target=_new_token_monitor_loop, name="new-token-monitor", daemon=True
+        )
+        _nansen_thread = threading.Thread(
+            target=_nansen_monitor_loop, name="nansen-monitor", daemon=True
+        )
         _worker_thread = threading.Thread(
             target=_backtest_worker_loop, name="backtest-worker", daemon=True
         )
         _monitor_thread.start()
+        _new_token_thread.start()
+        _nansen_thread.start()
         _worker_thread.start()
-        logger.info("🔭 Background backtest threads started (pair monitor + worker)")
+        logger.info(
+            "🔭 Background discovery threads started: "
+            "DexScreener boosted (60s) | RugCheck new tokens (15s) | "
+            "Nansen smart money (5min) | backtest worker"
+        )
 
         # Load initial state
         state = load_agent_state() or create_initial_state()

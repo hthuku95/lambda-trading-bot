@@ -44,7 +44,7 @@ services:
       - key: LANGCHAIN_PROJECT
         value: "lambda_trading_bot"
       - key: MAX_POSITION_SIZE_SOL
-        value: "0.1"
+        value: "1.0"
       - key: MIN_POSITION_SIZE_SOL
         value: "0.01"
       - key: MAX_POSITIONS
@@ -53,6 +53,10 @@ services:
         value: "300"
       - key: RISK_TOLERANCE
         value: "high"
+      - key: HUMAN_APPROVAL_THRESHOLD_SOL
+        value: "5.0"
+      - key: HUMAN_APPROVAL_TIMEOUT_MINUTES
+        value: "60"
       - key: SESSION_TIMEOUT_HOURS
         value: "8"
       - key: MAX_LOGIN_ATTEMPTS
@@ -78,6 +82,8 @@ services:
       - key: SOLANA_RPC_URL
         sync: false
       - key: LANGCHAIN_API_KEY
+        sync: false
+      - key: NANSEN_API_KEY
         sync: false
       - key: DASHBOARD_USERNAME
         sync: false
@@ -122,7 +128,7 @@ services:
       - key: LANGCHAIN_PROJECT
         value: "lambda_trading_bot"
       - key: MAX_POSITION_SIZE_SOL
-        value: "0.1"
+        value: "1.0"
       - key: SESSION_TIMEOUT_HOURS
         value: "8"
       - key: MAX_LOGIN_ATTEMPTS
@@ -148,6 +154,8 @@ services:
       - key: SOLANA_RPC_URL
         sync: false
       - key: LANGCHAIN_API_KEY
+        sync: false
+      - key: NANSEN_API_KEY
         sync: false
       - key: DASHBOARD_USERNAME
         sync: false

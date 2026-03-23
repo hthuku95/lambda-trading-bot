@@ -109,12 +109,53 @@ def render_trading_decisions(agent_state):
             
             st.caption(f"Reason: {decision.get('reason', 'No reason provided')}")
 
+def render_cross_model_insights(agent_state):
+    """Render cross-model shared insights from transaction history"""
+    st.subheader("🤝 Cross-Model Shared Insights")
+
+    transaction_history = agent_state.get('transaction_history', []) if agent_state else []
+
+    shared_insights = [
+        entry for entry in transaction_history
+        if entry.get('trade_type') == 'backtest_success'
+        or entry.get('document_type') == 'shared_insight'
+    ]
+
+    if not shared_insights:
+        st.info(
+            "No cross-model insights shared yet — insights are generated when "
+            "backtests show profitable strategies"
+        )
+        return
+
+    with st.expander(f"Shared Insights ({len(shared_insights)} total)", expanded=True):
+        for entry in shared_insights:
+            strategy_name = entry.get('strategy_name', 'Unknown Strategy')
+            token_symbol = entry.get('token_symbol', 'Unknown Token')
+            total_return_pct = entry.get('total_return_pct', entry.get('return_pct', 'N/A'))
+            win_rate = entry.get('win_rate', 'N/A')
+            model_provider = entry.get('model_provider', entry.get('shared_by', 'Unknown'))
+            timestamp = entry.get('timestamp', entry.get('created_at', ''))
+
+            # Format return/win-rate values
+            return_str = f"{total_return_pct:.1f}" if isinstance(total_return_pct, (int, float)) else str(total_return_pct)
+            win_str = f"{win_rate:.1f}" if isinstance(win_rate, (int, float)) else str(win_rate)
+
+            st.markdown(
+                f"**{strategy_name}** on **{token_symbol}**: "
+                f"{return_str}% return, {win_str}% win rate"
+            )
+            st.caption(f"Shared by: {model_provider} | {timestamp}")
+            st.write("---")
+
+
 def render_insights_tab(data):
     """Render the complete agent insights tab"""
     st.header("🧠 Agent Insights")
-    
+
     agent_state = data['agent_state']
-    
+
     render_agent_reasoning(agent_state)
     render_market_conditions(agent_state)
     render_trading_decisions(agent_state)
+    render_cross_model_insights(agent_state)
