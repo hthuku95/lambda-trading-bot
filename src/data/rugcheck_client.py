@@ -81,15 +81,27 @@ class RugCheckClient:
             response_time = (datetime.now() - start_time).total_seconds() * 1000
 
             if response.status_code == 200:
+                # Auth is only needed for bulk endpoints — core token reports are unauthenticated.
+                # Only attempt auth (and report its status) when a private key is configured.
+                wallet_configured = bool(self.private_key)
+                if wallet_configured:
+                    auth_ok = self.authenticate()
+                    auth_working = auth_ok
+                    auth_method = "solana_jwt" if auth_ok else "solana_jwt_failed"
+                else:
+                    auth_working = None  # Not configured — not needed for basic use
+                    auth_method = "not_configured"
+
                 return {
                     "healthy": True,
                     "working_endpoint": self.base_url,
                     "working_pattern": "/tokens/{token}/report",
                     "response_time_ms": response_time,
                     "solana_available": True,
-                    "auth_working": bool(self.auth_token),
-                    "wallet_configured": bool(self.private_key),
-                    "authentication_method": "solana_jwt" if self.auth_token else "none",
+                    "auth_working": auth_working,
+                    "wallet_configured": wallet_configured,
+                    "authentication_method": auth_method,
+                    "bulk_endpoints_available": auth_working is True,
                     "base_url": self.base_url,
                     "timestamp": datetime.now().isoformat()
                 }
@@ -108,40 +120,57 @@ class RugCheckClient:
             }
 
     def authenticate(self) -> bool:
-        """Authenticate with RugCheck using Solana wallet signature (unlocks bulk endpoints)."""
+        """Authenticate with RugCheck using Solana wallet signature (unlocks bulk endpoints).
+
+        Per the Swagger spec (POST /v1/auth/login/solana), the request body is:
+          {
+            "message": {"message": "Sign-in to Rugcheck.xyz", "publicKey": "<b58>", "timestamp": <int>},
+            "signature": {"data": [<bytes as ints>], "type": "ed25519"},
+            "wallet": "<b58 public key>"
+          }
+
+        The message string to sign is always "Sign-in to Rugcheck.xyz" (no GET needed).
+        The signature bytes are passed as an array of integers, not as a base58 string.
+        """
         if not self.private_key:
-            logger.warning("No SOLANA_PRIVATE_KEY — RugCheck bulk endpoints unavailable")
+            logger.info("No SOLANA_PRIVATE_KEY — RugCheck bulk endpoints will use individual fallback")
             return False
         if self.auth_token and self.auth_expires and datetime.now() < self.auth_expires:
             return True  # Reuse existing valid token
 
         try:
             import nacl.signing
-            import base58
 
-            # Get the message to sign
-            msg_resp = self.session.get(f"{self.base_url}/auth/login/solana", timeout=10)
-            if msg_resp.status_code != 200:
-                logger.error(f"RugCheck auth message fetch failed: {msg_resp.status_code}")
-                return False
+            # The message to sign is always this fixed string per API docs
+            MESSAGE = "Sign-in to Rugcheck.xyz"
+            timestamp = int(time.time())
 
-            message = msg_resp.json().get("message", "")
-            if not message:
-                logger.error("RugCheck returned empty auth message")
-                return False
-
-            # Sign with Solana private key
+            # Derive keys from the base58-encoded Solana private key
             key_bytes = base58.b58decode(self.private_key)
             signing_key = nacl.signing.SigningKey(key_bytes[:32])
-            signed = signing_key.sign(message.encode())
-            signature_b58 = base58.b58encode(signed.signature).decode()
-            verify_key_b58 = base58.b58encode(bytes(signing_key.verify_key)).decode()
+            public_key_b58 = base58.b58encode(bytes(signing_key.verify_key)).decode()
 
-            # Submit signature
+            # Sign the message — signature.data must be a list of integers per dto.AuthRequest
+            signed = signing_key.sign(MESSAGE.encode("utf-8"))
+            signature_bytes_as_ints = list(signed.signature)
+
+            payload = {
+                "message": {
+                    "message": MESSAGE,
+                    "publicKey": public_key_b58,
+                    "timestamp": timestamp,
+                },
+                "signature": {
+                    "data": signature_bytes_as_ints,
+                    "type": "ed25519",
+                },
+                "wallet": public_key_b58,
+            }
+
             auth_resp = self.session.post(
                 f"{self.base_url}/auth/login/solana",
-                json={"message": message, "signature": signature_b58, "wallet": verify_key_b58},
-                timeout=10
+                json=payload,
+                timeout=10,
             )
             if auth_resp.status_code == 200:
                 token = auth_resp.json().get("token", "")

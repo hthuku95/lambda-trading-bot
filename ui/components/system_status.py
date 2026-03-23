@@ -24,9 +24,15 @@ def render_api_health_status(data):
         if rugcheck_health.get("healthy", False):
             st.success("🟢 Online")
             st.write(f"• Solana Support: {'✅' if rugcheck_health.get('solana_available') else '❌'}")
-            st.write(f"• Authentication: {'✅ Wallet Configured' if rugcheck_health.get('wallet_configured') else '❌ No Wallet'}")
-            st.write(f"• Auth Status: {'✅ Working' if rugcheck_health.get('auth_working') else '❌ Failed'}")
-            st.write(f"• Method: {rugcheck_health.get('authentication_method', 'Unknown')}")
+            st.write(f"• Authentication: {'✅ Wallet Configured' if rugcheck_health.get('wallet_configured') else '⚪ No Wallet (not needed for basic use)'}")
+            auth_working = rugcheck_health.get('auth_working')
+            if auth_working is True:
+                st.write("• Auth Status: ✅ Working (bulk endpoints unlocked)")
+            elif auth_working is False:
+                st.write("• Auth Status: ❌ Failed (bulk fallback: individual requests)")
+            else:
+                st.write("• Auth Status: ⚪ Not configured (core endpoints are unauthenticated)")
+            st.write(f"• Bulk Endpoints: {'✅ Available' if rugcheck_health.get('bulk_endpoints_available') else '⚪ Using individual requests'}")
             if rugcheck_health.get('supported_chains'):
                 st.write(f"• Supported Chains: {rugcheck_health.get('supported_chains')}")
             st.write(f"• Response Time: {rugcheck_health.get('response_time_ms', 0):.0f}ms")
