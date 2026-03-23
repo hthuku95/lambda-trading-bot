@@ -1,7 +1,7 @@
 # ui/components/metrics.py
 """
 Metrics and summary cards for the Streamlit dashboard
-Updated for RugCheck + TweetScout integration (No BitQuery)
+Updated for RugCheck + Social Intelligence integration (Nansen + DexScreener) (No BitQuery)
 """
 import streamlit as st
 from datetime import datetime
@@ -25,7 +25,7 @@ def get_performance_color(percentage):
 def render_header():
     """Render the main dashboard header"""
     st.title("🚀 Solana Agentic Trading Bot")
-    st.markdown("**Enhanced with RugCheck + TweetScout Analysis**")
+    st.markdown("**Enhanced with RugCheck + Social Intelligence (Nansen + DexScreener) Analysis**")
     
     # Show current time and status
     col1, col2 = st.columns([3, 1])
@@ -36,7 +36,7 @@ def render_header():
         st.markdown("🟢 **ONLINE**")
 
 def render_summary_cards(data):
-    """Render the main summary metrics cards with RugCheck + TweetScout status"""
+    """Render the main summary metrics cards with RugCheck + Social Intelligence status"""
     col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
@@ -86,7 +86,7 @@ def render_summary_cards(data):
                     "🔬 Enrichment Coverage",
                     f"{enrichment_pct:.0f}%",
                     delta=f"{enriched_positions}/{total_positions}",
-                    help="Percentage of positions with RugCheck + TweetScout analysis"
+                    help="Percentage of positions with RugCheck + Social Intelligence analysis"
                 )
             else:
                 st.metric("🔬 Enrichment Coverage", "0%")
@@ -109,7 +109,7 @@ def render_summary_cards(data):
             st.metric("🎯 Win Rate", "0%")
 
 def render_performance_overview(agent_state):
-    """Render performance overview with RugCheck + TweetScout metrics"""
+    """Render performance overview with RugCheck + Social Intelligence metrics"""
     if not agent_state:
         st.info("No agent state available")
         return
@@ -172,7 +172,7 @@ def render_performance_overview(agent_state):
                 "🔍 Full Analysis",
                 f"{enrichment_coverage:.0f}%",
                 delta=f"{len(enriched_positions)}/{len(active_positions)}",
-                help="Positions with complete RugCheck + TweetScout analysis"
+                help="Positions with complete RugCheck + Social Intelligence analysis"
             )
         
         with quality_col2:
@@ -190,7 +190,7 @@ def render_performance_overview(agent_state):
                 "📱 Social Analysis",
                 f"{social_coverage:.0f}%",
                 delta=f"{len(social_positions)}/{len(active_positions)}",
-                help="Positions with TweetScout social analysis"
+                help="Positions with Social Intelligence analysis"
             )
         
         with quality_col4:
@@ -259,13 +259,13 @@ def render_enrichment_status_card():
     with status_col1:
         if capabilities.get('full_enrichment', False):
             st.success("🟢 Full Enrichment Active")
-            st.write("✅ RugCheck + TweetScout operational")
+            st.write("✅ RugCheck + Social Intelligence operational")
         elif capabilities.get('api_available', False):
             st.warning("🟡 Partial Enrichment")
             if capabilities.get('token_safety_analysis'):
                 st.write("✅ RugCheck available")
             if capabilities.get('social_sentiment_analysis'):
-                st.write("✅ TweetScout available")
+                st.write("✅ Social Intelligence available")
         else:
             st.error("🔴 Basic Analysis Only")
             st.write("⚠️ Enhanced APIs unavailable")
@@ -304,7 +304,7 @@ def render_api_cost_tracking():
             "$47.50",  # Would be calculated from actual usage
             delta="↓ 68% vs BitQuery",
             delta_color="normal",
-            help="Estimated monthly cost for RugCheck + TweetScout"
+            help="Estimated monthly cost for RugCheck + Nansen"
         )
     
     with cost_col3:

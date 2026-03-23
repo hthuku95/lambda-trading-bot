@@ -1,6 +1,6 @@
 # ui/components/system_status.py
 """
-Updated System Status Component - Using RugCheck + TweetScout with Wallet Authentication
+Updated System Status Component - Using RugCheck + Social Intelligence (Nansen + DexScreener) with Wallet Authentication
 Clean implementation with proper authentication method detection
 """
 import streamlit as st
@@ -12,7 +12,7 @@ from src.data.rugcheck_client import check_rugcheck_api_health
 from src.data.social_intelligence import check_social_intelligence_health
 
 def render_api_health_status(data):
-    """Render API health status for RugCheck + TweetScout"""
+    """Render API health status for RugCheck + Social Intelligence"""
     st.subheader("🔌 API Health Status")
     
     col1, col2 = st.columns(2)
@@ -46,9 +46,9 @@ def render_api_health_status(data):
                 st.write("• Wallet: ❌ Missing SOLANA_PRIVATE_KEY")
     
     with col2:
-        st.write("**TweetScout API**")
+        st.write("**Social Intelligence API**")
         social_health = check_social_intelligence_health()
-        
+
         if social_health.get("healthy", False):
             st.success("🟢 Online")
             st.write(f"• API Key: {'✅ Configured' if social_health.get('api_key_configured') else '❌ Missing'}")
@@ -123,20 +123,20 @@ def render_system_tests(data):
                     st.error(f"❌ Test failed: {str(e)}")
     
     with col2:
-        if st.button("📱 Test TweetScout"):
-            with st.spinner("Testing TweetScout..."):
+        if st.button("📱 Test Social Intel"):
+            with st.spinner("Testing Social Intelligence..."):
                 try:
                     from src.data.social_intelligence import social_intelligence_client
                     # Test social intelligence
                     result = social_intelligence_client.check_api_health()
-                    
+
                     if result.get('healthy'):
-                        st.success("✅ TweetScout test passed")
+                        st.success("✅ Social Intel test passed")
                         st.write(f"Status: {result.get('status', 'Unknown')}")
                         if result.get('response_time_ms'):
                             st.write(f"Response Time: {result.get('response_time_ms')}ms")
                     else:
-                        st.error("❌ TweetScout test failed")
+                        st.error("❌ Social Intel test failed")
                         st.write(f"Error: {result.get('error', 'Unknown error')}")
                 except Exception as e:
                     st.error(f"❌ Test failed: {str(e)}")
@@ -168,7 +168,7 @@ def render_environment_status():
     # Check environment variables for wallet-based authentication
     env_status = {
         "SOLANA_PRIVATE_KEY": bool(os.getenv("SOLANA_PRIVATE_KEY")),
-        "TWEETSCOUT_API_KEY": bool(os.getenv("TWEETSCOUT_API_KEY")),
+        "NANSEN_API_KEY": bool(os.getenv("NANSEN_API_KEY")),
         "OPENAI_API_KEY": bool(os.getenv("OPENAI_API_KEY")),
         "SOLANA_RPC_URL": bool(os.getenv("SOLANA_RPC_URL"))
     }
@@ -181,8 +181,8 @@ def render_environment_status():
         # Add context for each variable
         if key == "SOLANA_PRIVATE_KEY":
             description = " (Required for RugCheck wallet auth & trading)"
-        elif key == "TWEETSCOUT_API_KEY":
-            description = " (Required for social intelligence)"
+        elif key == "NANSEN_API_KEY":
+            description = " (Enables Nansen smart money intelligence)"
         elif key == "OPENAI_API_KEY":
             description = " (Required for AI agent operations)"
         elif key == "SOLANA_RPC_URL":
@@ -196,7 +196,7 @@ def render_environment_status():
     st.write("---")
     st.write("**Authentication Methods:**")
     st.write("✅ RugCheck: Solana Wallet Authentication")
-    st.write("✅ TweetScout: API Key Authentication")
+    st.write("✅ Nansen: API Key Authentication")
     st.write("✅ Solana RPC: Direct Connection")
     st.write("✅ OpenAI: API Key Authentication")
     
@@ -205,7 +205,7 @@ def render_environment_status():
     st.write("**Migration Status:**")
     st.write("✅ BitQuery dependencies removed")
     st.write("✅ RugCheck wallet authentication implemented")
-    st.write("✅ TweetScout client implemented")
+    st.write("✅ Social Intelligence (Nansen + DexScreener) active")
     st.write("✅ Unified enrichment active")
     st.write("✅ UI components updated")
     st.write("✅ System status aligned with wallet auth")
@@ -214,10 +214,10 @@ def render_environment_status():
     st.write("---")
     st.write("**System Information:**")
     st.write(f"• Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    st.write("• Data Sources: RugCheck + TweetScout + DexScreener")
+    st.write("• Data Sources: RugCheck + Nansen + DexScreener")
     st.write("• Architecture: Unified Enrichment")
     st.write("• Migration: Complete")
-    st.write("• Authentication: Wallet-Based (RugCheck) + API Keys (TweetScout)")
+    st.write("• Authentication: Wallet-Based (RugCheck) + API Keys (Nansen)")
 
 def render_troubleshooting_guide():
     """Render troubleshooting guide for common issues"""
@@ -231,25 +231,25 @@ def render_troubleshooting_guide():
         - `Signature verification failed`: Ensure private key format is correct (base58)
         - `No private key available`: Set SOLANA_PRIVATE_KEY environment variable
         
-        **TweetScout API Issues:**
-        - `403 Forbidden`: Verify your TWEETSCOUT_API_KEY is valid
-        - `402 Payment Required`: Check your TweetScout account billing
-        - Slow responses: TweetScout API can be slower than expected
-        
+        **Nansen API Issues:**
+        - `403 Forbidden`: Verify your NANSEN_API_KEY is valid
+        - `402 Payment Required`: Check your Nansen account billing/credits
+        - Slow responses: Nansen API can be slower than expected
+
         **Solana Wallet Issues:**
         - Invalid private key format: Ensure key is in base58 format
         - RPC connection failed: Check SOLANA_RPC_URL is set and accessible
         - Transaction signing failed: Verify wallet has sufficient SOL for gas
         
         **General Issues:**
-        - No enrichment data: Check that SOLANA_PRIVATE_KEY and TWEETSCOUT_API_KEY are configured
+        - No enrichment data: Check that SOLANA_PRIVATE_KEY and NANSEN_API_KEY are configured
         - Cache issues: Use the "Force Cache Clear" button
         - Import errors: Ensure all dependencies are installed correctly
         
         **Environment Setup:**
         1. Create a .env file in the project root
         2. Add your Solana private key: `SOLANA_PRIVATE_KEY=your_base58_private_key`
-        3. Add TweetScout API key: `TWEETSCOUT_API_KEY=your_api_key`
+        3. Add Nansen API key: `NANSEN_API_KEY=your_api_key`
         4. Add OpenAI API key: `OPENAI_API_KEY=your_openai_key`
         5. Add Solana RPC URL: `SOLANA_RPC_URL=your_rpc_endpoint`
         """)
@@ -306,9 +306,9 @@ def render_system_status_tab(data):
     
     with col2:
         if social_health.get("healthy"):
-            st.success("🟢 TweetScout\nONLINE")
+            st.success("🟢 Social Intel\nONLINE")
         else:
-            st.error("🔴 TweetScout\nOFFLINE")
+            st.error("🔴 Social Intel\nOFFLINE")
     
     with col3:
         if capabilities.get("full_enrichment"):

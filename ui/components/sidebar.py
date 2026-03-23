@@ -691,7 +691,7 @@ def render_sidebar(data):
             sources = [
                 ("DexScreener", True),  # Always available
                 ("RugCheck", capabilities.get('safety_data_collection', False)),
-                ("TweetScout", capabilities.get('social_data_collection', False)),
+                ("Social Intel (Nansen + DexScreener)", capabilities.get('social_data_collection', False)),
                 ("Vector Memory", capabilities.get('api_available', False))
             ]
             

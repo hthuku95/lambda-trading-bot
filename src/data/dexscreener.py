@@ -171,7 +171,7 @@ def process_pair_data(pair_data: Dict) -> Dict[str, Any]:
             
             # Placeholders for enrichment data (will be filled by other sources)
             "safety_raw_data": {},      # Will be populated by RugCheck
-            "social_raw_data": {},      # Will be populated by TweetScout
+            "social_raw_data": {},      # Will be populated by Social Intelligence (Nansen + DexScreener)
             "whale_raw_data": {},       # Will be populated by whale analysis
             
             # AI analysis placeholders (will be filled by AI agent)
@@ -186,7 +186,7 @@ def process_pair_data(pair_data: Dict) -> Dict[str, Any]:
             "data_sources_used": {
                 "dexscreener": True,
                 "rugcheck": False,
-                "tweetscout": False
+                "social": False
             },
             
             # Data collection timestamp

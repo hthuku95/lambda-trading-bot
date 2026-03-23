@@ -1,7 +1,7 @@
 # ui/components/trading_history.py
 """
 Trading history tab component for the Streamlit dashboard
-Updated for RugCheck + TweetScout integration (No BitQuery)
+Updated for RugCheck + Social Intelligence integration (Nansen + DexScreener) (No BitQuery)
 """
 import streamlit as st
 import pandas as pd
@@ -26,7 +26,7 @@ def render_transaction_stats(transactions):
     # Enrichment stats
     enriched_txs = [tx for tx in transactions if tx.get('enriched', False)]
     rugcheck_txs = [tx for tx in transactions if tx.get('safety_score', 0) > 0]
-    tweetscout_txs = [tx for tx in transactions if tx.get('social_activity', 0) > 0]
+    social_txs = [tx for tx in transactions if tx.get('social_activity', 0) > 0]
     
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -47,15 +47,15 @@ def render_transaction_stats(transactions):
     
     with analysis_col1:
         full_coverage = (len(enriched_txs) / len(transactions)) * 100 if transactions else 0
-        st.metric("Full Analysis", f"{full_coverage:.0f}%", help="RugCheck + TweetScout")
+        st.metric("Full Analysis", f"{full_coverage:.0f}%", help="RugCheck + Social Intelligence")
     
     with analysis_col2:
         safety_coverage = (len(rugcheck_txs) / len(transactions)) * 100 if transactions else 0
         st.metric("Safety Analysis", f"{safety_coverage:.0f}%", help="RugCheck only")
     
     with analysis_col3:
-        social_coverage = (len(tweetscout_txs) / len(transactions)) * 100 if transactions else 0
-        st.metric("Social Analysis", f"{social_coverage:.0f}%", help="TweetScout only")
+        social_coverage = (len(social_txs) / len(transactions)) * 100 if transactions else 0
+        st.metric("Social Analysis", f"{social_coverage:.0f}%", help="Social Intelligence only")
 
 def render_profit_distribution(transactions):
     """Render profit distribution chart with enrichment overlay"""

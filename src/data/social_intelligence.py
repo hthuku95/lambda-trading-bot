@@ -52,7 +52,7 @@ class SocialIntelligenceClient:
     def get_token_social_data_raw(self, token_address: str, token_symbol: str = None) -> Dict[str, Any]:
         """
         Get RAW social data for a token - NO PROCESSING OR JUDGMENT.
-        Returns DexScreener social signals + deprecated stubs for TweetScout fields.
+        Returns DexScreener social signals + Nansen smart money intelligence.
         """
         cache_key = f"social_raw_data_{token_address}_{token_symbol}"
         cached = get_cached_data(cache_key)

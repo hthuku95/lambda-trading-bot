@@ -1,7 +1,7 @@
 # src/agent/state.py
 """
 Modern State Management - Pure AI Trading Agent
-ZERO BitQuery dependencies - Full compatibility with RugCheck + TweetScout + DexScreener
+ZERO BitQuery dependencies - Full compatibility with RugCheck + Social Intelligence (Nansen + DexScreener)
 AI-driven analysis and judgment system
 """
 import os
@@ -69,9 +69,9 @@ class TokenData(TypedDict):
     risk_factors: List[Dict[str, Any]]  # List of detected risk factors
     
     # ============================================================================
-    # RAW SOCIAL DATA (from TweetScout)  
+    # RAW SOCIAL DATA (from Nansen + DexScreener)
     # ============================================================================
-    social_raw_data: Dict[str, Any]     # Complete raw TweetScout response
+    social_raw_data: Dict[str, Any]     # Complete raw social intelligence response
     
     # Key social indicators (extracted from raw data)
     social_mentions_24h: int       # Social mentions in 24h
@@ -118,7 +118,7 @@ class TokenData(TypedDict):
     # Data collection timestamps
     dexscreener_timestamp: str     # When DexScreener data was collected
     rugcheck_timestamp: str        # When RugCheck data was collected
-    tweetscout_timestamp: str      # When TweetScout data was collected
+    social_timestamp: str          # When social intelligence data was collected
     
     # Legacy compatibility (for gradual migration)
     enriched_legacy: bool          # For compatibility with existing UI components

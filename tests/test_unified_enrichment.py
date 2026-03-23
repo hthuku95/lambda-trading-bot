@@ -8,12 +8,12 @@ def mock_data_sources():
     with patch('src.data.unified_enrichment.get_token_safety_data_raw') as mock_rugcheck, \
          patch('src.data.unified_enrichment.get_social_data_raw') as mock_social, \
          patch('src.data.unified_enrichment.get_token_pairs') as mock_dexscreener:
-        
+
         # Configure default successful mock returns
         mock_rugcheck.return_value = {"data_available": True, "score_raw": 500}
-        mock_social.return_value = {"tweetscout_accounts": {"total_accounts": 5}}
+        mock_social.return_value = {"nansen_accounts": {"total_accounts": 5}}
         mock_dexscreener.return_value = [{"baseToken": {"symbol": "TEST"}}]
-        
+
         yield {
             "rugcheck": mock_rugcheck,
             "social": mock_social,
@@ -40,9 +40,9 @@ def test_get_comprehensive_raw_data_all_sources_succeed(enrichment_client, mock_
     # Verify that the final structure contains data from all sources
     assert "dexscreener_raw" in data and "error" not in data["dexscreener_raw"]
     assert "rugcheck_raw" in data and data["rugcheck_raw"]["data_available"]
-    assert "tweetscout_raw" in data and "error" not in data["tweetscout_raw"]
+    assert "social_raw" in data and "error" not in data["social_raw"]
     assert data["data_sources_status"]["rugcheck_success"] is True
-    assert data["data_sources_status"]["tweetscout_success"] is True
+    assert data["data_sources_status"]["social_success"] is True
 
 def test_get_comprehensive_raw_data_partial_failure(enrichment_client, mock_data_sources):
     """
@@ -56,9 +56,9 @@ def test_get_comprehensive_raw_data_partial_failure(enrichment_client, mock_data
 
     # Verify that the final structure correctly reflects the partial failure
     assert "rugcheck_raw" in data and "error" in data["rugcheck_raw"]
-    assert "tweetscout_raw" in data and "error" not in data["tweetscout_raw"] # Should still be successful
+    assert "social_raw" in data and "error" not in data["social_raw"]  # Should still be successful
     assert data["data_sources_status"]["rugcheck_success"] is False
-    assert data["data_sources_status"]["tweetscout_success"] is True
+    assert data["data_sources_status"]["social_success"] is True
     assert "RugCheck data unavailable - safety analysis limited" in data["data_quality_notes"]
 
 def test_get_comprehensive_raw_data_no_symbol(enrichment_client, mock_data_sources):
@@ -79,7 +79,7 @@ def test_assess_data_quality(enrichment_client):
     full_data = {
         "dexscreener_raw": {"pairs_raw": [{}]},
         "rugcheck_raw": {"data_available": True},
-        "tweetscout_raw": {}
+        "social_raw": {}
     }
     assessed_full = enrichment_client._assess_data_quality(full_data)
     assert assessed_full["data_quality_assessment"]["data_completeness"]["total_sources_available"] == 3
@@ -89,7 +89,7 @@ def test_assess_data_quality(enrichment_client):
     partial_data = {
         "dexscreener_raw": {"pairs_raw": [{}]},
         "rugcheck_raw": {"error": "Failed"},
-        "tweetscout_raw": {}
+        "social_raw": {}
     }
     assessed_partial = enrichment_client._assess_data_quality(partial_data)
     assert assessed_partial["data_quality_assessment"]["data_completeness"]["total_sources_available"] == 2

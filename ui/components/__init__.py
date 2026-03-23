@@ -1,6 +1,6 @@
 # ui/components/__init__.py
 """
-Updated Dashboard Components Module - RugCheck + TweetScout (No BitQuery)
+Updated Dashboard Components Module - RugCheck + Social Intelligence (Nansen + DexScreener) (No BitQuery)
 """
 from .sidebar import render_sidebar
 from .metrics import render_header, render_summary_cards, render_performance_overview

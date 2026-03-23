@@ -1,6 +1,6 @@
 # ui/components/tokens.py
 """
-Updated Token Analysis Tab - Using RugCheck + TweetScout (No BitQuery)
+Updated Token Analysis Tab - Using RugCheck + Social Intelligence (Nansen + DexScreener) (No BitQuery)
 """
 import streamlit as st
 import pandas as pd
@@ -32,7 +32,7 @@ def render_token_summary_table(tokens):
         st.dataframe(df, use_container_width=True)
 
 def render_detailed_token_analysis(tokens):
-    """Render detailed token analysis with RugCheck + TweetScout enhancements"""
+    """Render detailed token analysis with RugCheck + Social Intelligence enhancements"""
     for token in tokens[:5]:  # Show detailed view for top 5
         safety_score = token.get('safety_score', 0)
         enriched = token.get('enriched', False)
@@ -54,8 +54,8 @@ def render_detailed_token_analysis(tokens):
             sources = []
             if data_sources.get('rugcheck_used'):
                 sources.append("RugCheck")
-            if data_sources.get('tweetscout_used'):
-                sources.append("TweetScout")
+            if data_sources.get('social_used'):
+                sources.append("Social Intel")
             title += f" ({'+'.join(sources)}) 🔬"
         
         with st.expander(title, expanded=True):
@@ -100,7 +100,7 @@ def render_detailed_token_analysis(tokens):
                             st.info(f"ℹ️ {risk_type}")
 
 def render_tokens_tab(data):
-    """Render the tokens analysis tab with RugCheck + TweetScout data"""
+    """Render the tokens analysis tab with RugCheck + Social Intelligence data"""
     st.header("🔍 Token Analysis")
     
     # Get validated tokens
@@ -171,7 +171,7 @@ def render_tokens_tab(data):
 
 # ui/components/portfolio.py
 """
-Updated Portfolio Tab - Using RugCheck + TweetScout (No BitQuery)
+Updated Portfolio Tab - Using RugCheck + Social Intelligence (Nansen + DexScreener) (No BitQuery)
 """
 import streamlit as st
 import pandas as pd
@@ -191,7 +191,7 @@ def render_portfolio_allocation(positions):
         st.plotly_chart(fig, use_container_width=True)
 
 def render_active_positions(positions):
-    """Render detailed active positions display with RugCheck + TweetScout enhancements"""
+    """Render detailed active positions display with RugCheck + Social Intelligence enhancements"""
     st.subheader("Active Positions")
     for i, position in enumerate(positions):
         profit_pct = position.get('current_profit_percentage', 0)
@@ -267,7 +267,7 @@ def render_active_positions(positions):
                             st.write(f"• {risk.get('type', 'Unknown')}")
 
 def render_portfolio_tab(data):
-    """Render the portfolio tab with RugCheck + TweetScout enhancements"""
+    """Render the portfolio tab with RugCheck + Social Intelligence enhancements"""
     st.header("📈 Portfolio")
     
     agent_state = data.get('agent_state') or {}
@@ -309,7 +309,7 @@ def render_portfolio_tab(data):
 
 # ui/components/insights.py
 """
-Updated Agent Insights Tab - Using RugCheck + TweetScout (No BitQuery)
+Updated Agent Insights Tab - Using RugCheck + Social Intelligence (Nansen + DexScreener) (No BitQuery)
 """
 import streamlit as st
 import pandas as pd
@@ -347,13 +347,13 @@ def render_enrichment_insights(data):
         # Data source usage
         st.write("**Data Source Usage:**")
         rugcheck_used = len([t for t in enriched_tokens if t.get('data_sources_used', {}).get('rugcheck_used')])
-        tweetscout_used = len([t for t in enriched_tokens if t.get('data_sources_used', {}).get('tweetscout_used')])
-        
+        social_used = len([t for t in enriched_tokens if t.get('data_sources_used', {}).get('social_used')])
+
         col1, col2 = st.columns(2)
         with col1:
             st.write(f"RugCheck: {rugcheck_used}/{len(enriched_tokens)} tokens")
         with col2:
-            st.write(f"TweetScout: {tweetscout_used}/{len(enriched_tokens)} tokens")
+            st.write(f"Social Intel: {social_used}/{len(enriched_tokens)} tokens")
 
 def render_safety_analysis_insights(data):
     """Render safety analysis insights from RugCheck"""
@@ -401,7 +401,7 @@ def render_safety_analysis_insights(data):
             st.write(f"• {risk_type}: {count} tokens")
 
 def render_social_sentiment_insights(data):
-    """Render social sentiment insights from TweetScout"""
+    """Render social sentiment insights from Nansen + DexScreener"""
     st.subheader("📱 Social Sentiment Insights")
     
     agent_state = data.get('agent_state') or {}
@@ -479,7 +479,7 @@ def render_trading_recommendations_insights(data):
         st.plotly_chart(fig, use_container_width=True)
 
 def render_insights_tab(data):
-    """Render the agent insights tab with RugCheck + TweetScout data"""
+    """Render the agent insights tab with RugCheck + Social Intelligence data"""
     st.header("🧠 Agent Insights")
     
     # Token enrichment insights

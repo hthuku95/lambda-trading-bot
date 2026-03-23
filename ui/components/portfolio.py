@@ -1,7 +1,7 @@
 # ui/components/portfolio.py
 """
 Portfolio tab component for the Streamlit dashboard
-Updated for RugCheck + TweetScout integration (No BitQuery)
+Updated for RugCheck + Social Intelligence integration (No BitQuery)
 """
 import streamlit as st
 import pandas as pd
@@ -49,7 +49,7 @@ def render_portfolio_allocation(positions):
         st.plotly_chart(fig, use_container_width=True)
 
 def render_active_positions(positions):
-    """Render detailed active positions display with RugCheck + TweetScout enhancements"""
+    """Render detailed active positions display with RugCheck + Social Intelligence enhancements"""
     st.subheader("📋 Active Positions")
     
     if not positions:
@@ -141,7 +141,7 @@ def render_active_positions(positions):
                     st.write("• ⚠️ Trade with caution")
             
             with col4:
-                # TweetScout social analysis
+                # Social analysis (Nansen + DexScreener)
                 st.write("**📱 Social Analysis:**")
                 if social_activity > 0:
                     # Color code social activity
@@ -289,8 +289,8 @@ def render_portfolio_performance_chart(positions):
     # Add legend
     st.markdown("""
     **Analysis Quality Legend:**
-    - 🟢 **Full Analysis**: RugCheck + TweetScout data available
-    - 🟡 **Partial Analysis**: Either RugCheck or TweetScout data available  
+    - 🟢 **Full Analysis**: RugCheck + Social Intelligence data available
+    - 🟡 **Partial Analysis**: Either RugCheck or Social Intelligence data available
     - 🔴 **Basic Analysis**: DexScreener data only
     """)
 
