@@ -52,6 +52,8 @@ chat_history*.json
 *.sqlite3
 chroma_db/
 langgraph_checkpoints.db
+langgraph_checkpoints.db-shm
+langgraph_checkpoints.db-wal
 
 # ============================================================
 # LOGS
