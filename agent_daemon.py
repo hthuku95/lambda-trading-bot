@@ -252,22 +252,26 @@ def run_agent_daemon():
                 logger.info(f"🔄 CYCLE {cycle_count} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                 logger.info(f"{'=' * 80}")
 
-                # Run trading cycle
+                # Record cycle to DB first so we have a cycle_id for trade records
+                _cycle_id = None
+                if _session_id:
+                    try:
+                        from src.db.trade_store import record_cycle as _record_cycle
+                        _cycle_id = _record_cycle(_session_id, cycle_count, state)
+                    except Exception as _ce:
+                        logger.debug(f"record_cycle (pre-run) skipped: {_ce}")
+
+                # Run trading cycle — passes session_id + cycle_id so trades are
+                # automatically persisted to PostgreSQL and vectorized into AstraDB
                 state = agent.run_trading_cycle(
-                    initial_state=state
+                    initial_state=state,
+                    session_id=_session_id,
+                    cycle_id=_cycle_id,
                 )
 
                 # Update cycle count
                 state["cycles_completed"] = cycle_count
                 state = update_portfolio_metrics(state)
-
-                # Record cycle to DB
-                if _session_id:
-                    try:
-                        from src.db.trade_store import record_cycle as _record_cycle
-                        _record_cycle(_session_id, cycle_count, state)
-                    except Exception as _ce:
-                        logger.debug(f"record_cycle skipped: {_ce}")
 
                 # Save state
                 save_agent_state(state)

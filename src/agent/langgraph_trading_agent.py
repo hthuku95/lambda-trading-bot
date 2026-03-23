@@ -1033,12 +1033,17 @@ class CompleteLangGraphTradingAgent:
             logger.info("SqliteSaver not available — falling back to MemorySaver")
         return workflow.compile(checkpointer=checkpointer)
 
-    def run_trading_cycle(self, initial_state: AgentState = None) -> AgentState:
+    def run_trading_cycle(
+        self,
+        initial_state: AgentState = None,
+        session_id: str = None,
+        cycle_id: int = None,
+    ) -> AgentState:
         if initial_state is None:
             state = load_agent_state() or create_initial_state()
         else:
             state = initial_state
-        
+
         state = update_portfolio_metrics(state)
 
         # Set current trading mode for tools
@@ -1060,10 +1065,10 @@ class CompleteLangGraphTradingAgent:
             },
             "tags": ["trading_cycle", self.model_provider, trading_mode],
         }
-        
+
         # Pass model_provider in the agent_state so tools can access it
         state["model_provider"] = self.model_provider
-        
+
         # The initial state for the graph must match the TradingAgentState TypedDict
         graph_initial_state = {
             "messages": [HumanMessage(content=context_message)],
@@ -1078,11 +1083,11 @@ class CompleteLangGraphTradingAgent:
         # Extract and save the final state from the graph's state
         final_agent_state = final_state_graph['agent_state']
         final_ai_message = final_state_graph['messages'][-1]
-        
+
         final_agent_state["agent_reasoning"] = final_ai_message.content
         final_agent_state["cycles_completed"] = final_agent_state.get("cycles_completed", 0) + 1
         final_agent_state["last_update_timestamp"] = datetime.now().isoformat()
-        
+
         # Extract tool calls from the entire exchange
         all_messages = final_state_graph['messages']
         tools_used = [
@@ -1093,8 +1098,118 @@ class CompleteLangGraphTradingAgent:
         ]
         final_agent_state["tools_used_this_cycle"] = tools_used
 
+        # Persist every execute_trade_tool result to PostgreSQL + AstraDB
+        self._persist_cycle_trades(
+            all_messages, final_agent_state, session_id, cycle_id
+        )
+
         save_agent_state(final_agent_state)
         return final_agent_state
+
+    def _persist_cycle_trades(
+        self,
+        all_messages: list,
+        final_state: AgentState,
+        session_id: str = None,
+        cycle_id: int = None,
+    ) -> None:
+        """
+        Scan LangGraph messages for execute_trade_tool calls and their results.
+        For each trade found:
+          - Append to state["transaction_history"]
+          - Record to PostgreSQL (record_trade)
+          - Vectorize into AstraDB (add_trading_experience) for agent learning
+        """
+        import ast
+
+        # Build a map of tool_call_id → result content for fast lookup
+        tool_results: dict[str, str] = {}
+        for msg in all_messages:
+            if isinstance(msg, ToolMessage):
+                tool_results[msg.tool_call_id] = msg.content
+
+        # Walk AIMessages to find execute_trade_tool invocations
+        for msg in all_messages:
+            if not (isinstance(msg, AIMessage) and msg.tool_calls):
+                continue
+            for tc in msg.tool_calls:
+                if tc["name"] != "execute_trade_tool":
+                    continue
+
+                raw_result = tool_results.get(tc["id"], "")
+                if not raw_result:
+                    continue
+
+                # Parse stringified dict (ToolMessage content is str(dict))
+                try:
+                    trade_result = ast.literal_eval(raw_result)
+                except Exception:
+                    try:
+                        trade_result = json.loads(raw_result)
+                    except Exception:
+                        logger.warning(f"Could not parse trade result: {raw_result[:200]}")
+                        continue
+
+                if not isinstance(trade_result, dict):
+                    continue
+
+                # Enrich with context not available inside the tool
+                trade_result["model_provider"] = self.model_provider
+                trade_result["trading_mode"] = final_state.get("trading_mode", "dry_run")
+                trade_result["cycle_number"] = final_state.get("cycles_completed", 0)
+                trade_result["wallet_balance_sol"] = final_state.get("wallet_balance_sol", 0)
+
+                # ── 1. transaction_history ──────────────────────────────────
+                history = final_state.setdefault("transaction_history", [])
+                history.append(trade_result)
+                # Keep last 200 entries
+                if len(history) > 200:
+                    final_state["transaction_history"] = history[-200:]
+
+                # ── 2. PostgreSQL ────────────────────────────────────────────
+                if session_id:
+                    try:
+                        from src.db.trade_store import record_trade
+                        trade_id = record_trade(session_id, cycle_id, trade_result)
+                        if trade_id:
+                            logger.info(
+                                f"Trade recorded to PostgreSQL: id={trade_id} "
+                                f"type={trade_result.get('trade_type')} "
+                                f"token={str(trade_result.get('token_address',''))[:8]}... "
+                                f"dry_run={trade_result.get('dry_run')}"
+                            )
+                    except Exception as e:
+                        logger.warning(f"record_trade skipped: {e}")
+
+                # ── 3. AstraDB vectorization ────────────────────────────────
+                token_address = trade_result.get("token_address", "")
+                if token_address:
+                    try:
+                        experience = {
+                            "model_provider": self.model_provider,
+                            "trade_type": trade_result.get("trade_type", "unknown"),
+                            "token_symbol": trade_result.get("token_symbol", "unknown"),
+                            "amount_sol": trade_result.get("amount_sol", 0),
+                            "dry_run": trade_result.get("dry_run", True),
+                            "transaction_ready": trade_result.get("transaction_ready"),
+                            "success": trade_result.get("success", False),
+                            "ai_reasoning": trade_result.get("reasoning", ""),
+                            "market_conditions": final_state.get("market_conditions", {}),
+                            "wallet_balance_sol": final_state.get("wallet_balance_sol", 0),
+                            "profit_percentage": 0,  # updated when position closes
+                            "safety_score": 0,
+                            "timestamp": trade_result.get("timestamp", datetime.now().isoformat()),
+                            "cycle_number": trade_result.get("cycle_number", 0),
+                            "trading_mode": trade_result.get("trading_mode", "dry_run"),
+                        }
+                        add_trading_experience(token_address, experience)
+                        logger.info(
+                            f"Trade vectorized to AstraDB: "
+                            f"{trade_result.get('trade_type')} {token_address[:8]}... "
+                            f"(dry_run={trade_result.get('dry_run')})"
+                        )
+                    except Exception as e:
+                        logger.warning(f"add_trading_experience skipped: {e}")
 
     def _create_context_message(self, state: AgentState) -> str:
         """Creates the initial prompt for the trading cycle."""
