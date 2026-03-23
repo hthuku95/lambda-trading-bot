@@ -735,6 +735,194 @@ def get_market_overview_tool() -> Dict[str, Any]:
         return {"success": False, "error": str(e)}
 
 # ============================================================================
+# BACKTESTING TOOLS
+# ============================================================================
+
+@tool
+def fetch_token_ohlcv_tool(token_address: str, days_back: int = 30) -> str:
+    """
+    Fetch historical OHLCV price candles for a Solana token (5-minute intervals).
+    Results are cached in the database. Use before running backtests.
+
+    Args:
+        token_address: Solana token mint address
+        days_back: How many days of history to fetch (default 30, max 90)
+    """
+    try:
+        from src.data.historical_data import fetch_ohlcv, get_ohlcv_summary
+        days_back = min(max(int(days_back), 1), 90)
+        candles = fetch_ohlcv(token_address, days_back=days_back, interval_minutes=5)
+        summary = get_ohlcv_summary(candles)
+        result = {
+            "success": True,
+            "token_address": token_address,
+            "days_back": days_back,
+            **summary,
+        }
+        out = str(result)
+        return out[:4000] + "\n...[truncated]" if len(out) > 4000 else out
+    except Exception as e:
+        logger.error(f"fetch_token_ohlcv_tool error: {e}")
+        return str({"success": False, "error": str(e)})
+
+
+@tool
+def run_strategy_backtest_tool(
+    token_address: str,
+    strategy_name: str,
+    days_back: int = 30,
+) -> str:
+    """
+    Run a single named strategy backtest against historical OHLCV data for a token.
+    Saves result to PostgreSQL and stores trade log in AstraDB for future learning.
+
+    Available strategies: momentum, safety_first, quick_flip, reversal, breakout, hybrid
+
+    Args:
+        token_address: Solana token mint address
+        strategy_name: One of: momentum, safety_first, quick_flip, reversal, breakout, hybrid
+        days_back: Days of history to use (default 30)
+    """
+    try:
+        import uuid as _uuid
+        from src.data.historical_data import fetch_ohlcv
+        from src.backtesting.engine import run_backtest
+        from src.backtesting.strategies import get_strategy
+        from src.db.backtest_store import save_backtest_result
+
+        candles = fetch_ohlcv(token_address, days_back=days_back, interval_minutes=5)
+        if not candles:
+            return str({"success": False, "error": "No OHLCV data available for this token"})
+
+        strategy_fn = get_strategy(strategy_name)
+        result = run_backtest(token_address, strategy_fn, candles)
+
+        run_id = str(_uuid.uuid4())[:12]
+        save_backtest_result(result, run_id=run_id, model_provider=_current_model_provider)
+
+        # Store each trade in AstraDB for learning
+        if result.trade_log:
+            try:
+                for trade in result.trade_log[:20]:  # limit to 20 per run
+                    trade["model_provider"] = _current_model_provider
+                    trade["ai_reasoning"] = f"Backtest {strategy_name}: {result.total_return_pct:.1f}% total return"
+                    add_trading_experience(token_address, trade)
+            except Exception as mem_err:
+                logger.debug(f"AstraDB trade log save failed: {mem_err}")
+
+        summary = {
+            "success": True,
+            "strategy": result.strategy_name,
+            "token_address": token_address,
+            "candles_used": len(candles),
+            "num_trades": result.num_trades,
+            "win_rate_pct": round(result.win_rate * 100, 1),
+            "total_return_pct": result.total_return_pct,
+            "max_drawdown_pct": result.max_drawdown_pct,
+            "sharpe_ratio": result.sharpe_ratio,
+            "avg_hold_minutes": result.avg_hold_minutes,
+            "best_trade_pct": result.best_trade_pct,
+            "worst_trade_pct": result.worst_trade_pct,
+            "run_id": run_id,
+        }
+        out = str(summary)
+        return out[:4000] + "\n...[truncated]" if len(out) > 4000 else out
+    except Exception as e:
+        logger.error(f"run_strategy_backtest_tool error: {e}")
+        return str({"success": False, "error": str(e)})
+
+
+@tool
+def compare_strategies_backtest_tool(
+    token_address: str,
+    days_back: int = 30,
+) -> str:
+    """
+    Run all 6 strategies in parallel against a token's historical data.
+    Returns a ranked table to help decide which strategy performs best.
+    Saves all results to PostgreSQL and AstraDB.
+
+    Strategies compared: momentum, safety_first, quick_flip, reversal, breakout, hybrid
+
+    Args:
+        token_address: Solana token mint address
+        days_back: Days of history to use (default 30)
+    """
+    try:
+        import uuid as _uuid
+        from src.backtesting.engine import run_parallel_backtests
+        from src.backtesting.strategies import list_strategies
+        from src.db.backtest_store import save_backtest_result
+
+        run_id = str(_uuid.uuid4())[:12]
+        results = run_parallel_backtests([token_address], list_strategies(), days_back=days_back)
+
+        rankings = []
+        for r in sorted(results, key=lambda x: x.total_return_pct, reverse=True):
+            save_backtest_result(r, run_id=run_id, model_provider=_current_model_provider)
+            rankings.append({
+                "strategy": r.strategy_name,
+                "total_return_pct": r.total_return_pct,
+                "win_rate_pct": round(r.win_rate * 100, 1),
+                "num_trades": r.num_trades,
+                "sharpe": r.sharpe_ratio,
+                "max_dd_pct": r.max_drawdown_pct,
+                "avg_hold_min": r.avg_hold_minutes,
+                "error": r.error or None,
+            })
+
+        summary = {
+            "success": True,
+            "token_address": token_address,
+            "days_back": days_back,
+            "run_id": run_id,
+            "best_strategy": rankings[0]["strategy"] if rankings else "none",
+            "strategy_rankings": rankings,
+        }
+        out = str(summary)
+        return out[:4000] + "\n...[truncated]" if len(out) > 4000 else out
+    except Exception as e:
+        logger.error(f"compare_strategies_backtest_tool error: {e}")
+        return str({"success": False, "error": str(e)})
+
+
+@tool
+def get_best_strategy_tool(token_address: str = "") -> str:
+    """
+    Query the backtest results database to find the best-performing strategies.
+    If token_address given, returns strategy rankings for that specific token.
+    Otherwise returns the global leaderboard of top strategy+token combos.
+
+    Args:
+        token_address: Optional Solana token mint address (leave blank for global leaderboard)
+    """
+    try:
+        from src.db.backtest_store import get_best_strategy_for_token, get_backtest_leaderboard
+
+        if token_address.strip():
+            data = get_best_strategy_for_token(token_address.strip(), _current_model_provider)
+            result = {
+                "success": True,
+                "token_address": token_address,
+                "strategy_rankings": data,
+                "recommendation": data[0]["strategy_name"] if data else "no data — run compare_strategies_backtest_tool first",
+            }
+        else:
+            leaderboard = get_backtest_leaderboard(limit=15)
+            result = {
+                "success": True,
+                "global_leaderboard": leaderboard,
+                "tip": "Use compare_strategies_backtest_tool on a specific token to populate this leaderboard",
+            }
+
+        out = str(result)
+        return out[:4000] + "\n...[truncated]" if len(out) > 4000 else out
+    except Exception as e:
+        logger.error(f"get_best_strategy_tool error: {e}")
+        return str({"success": False, "error": str(e)})
+
+
+# ============================================================================
 # Custom LangGraph Node Functions (Standalone)
 # ============================================================================
 
@@ -825,6 +1013,9 @@ class CompleteLangGraphTradingAgent:
             query_trade_history_db_tool, get_performance_analytics_db_tool,
             compare_model_performance_db_tool, get_session_history_db_tool,
             search_system_logs_db_tool, get_top_tokens_db_tool,
+            # Backtesting tools
+            fetch_token_ohlcv_tool, run_strategy_backtest_tool,
+            compare_strategies_backtest_tool, get_best_strategy_tool,
         ]
 
     def _build_graph(self):

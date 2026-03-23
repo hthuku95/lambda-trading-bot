@@ -242,6 +242,50 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     metadata       JSONB
 );
 CREATE INDEX IF NOT EXISTS idx_chat_provider ON chat_messages(model_provider, timestamp DESC);
+
+-- ============================================================
+-- BACKTESTING
+-- ============================================================
+CREATE TABLE IF NOT EXISTS backtest_ohlcv_cache (
+    id               BIGSERIAL PRIMARY KEY,
+    token_address    TEXT NOT NULL,
+    interval_minutes INTEGER NOT NULL DEFAULT 5,
+    timestamp        BIGINT NOT NULL,
+    open_price       DOUBLE PRECISION,
+    high_price       DOUBLE PRECISION,
+    low_price        DOUBLE PRECISION,
+    close_price      DOUBLE PRECISION,
+    volume_usd       DOUBLE PRECISION,
+    fetched_at       TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(token_address, interval_minutes, timestamp)
+);
+CREATE INDEX IF NOT EXISTS idx_backtest_ohlcv_token_ts
+    ON backtest_ohlcv_cache(token_address, timestamp);
+
+CREATE TABLE IF NOT EXISTS backtest_results (
+    id                BIGSERIAL PRIMARY KEY,
+    run_id            TEXT NOT NULL,
+    token_address     TEXT,
+    token_symbol      TEXT,
+    strategy_name     TEXT NOT NULL,
+    model_provider    TEXT,
+    timeframe_start   TIMESTAMPTZ,
+    timeframe_end     TIMESTAMPTZ,
+    num_trades        INTEGER DEFAULT 0,
+    win_rate          DOUBLE PRECISION,
+    total_return_pct  DOUBLE PRECISION,
+    max_drawdown_pct  DOUBLE PRECISION,
+    sharpe_ratio      DOUBLE PRECISION,
+    avg_hold_minutes  DOUBLE PRECISION,
+    best_trade_pct    DOUBLE PRECISION,
+    worst_trade_pct   DOUBLE PRECISION,
+    parameters        JSONB DEFAULT '{}',
+    created_at        TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_backtest_results_strategy
+    ON backtest_results(strategy_name, model_provider);
+CREATE INDEX IF NOT EXISTS idx_backtest_results_run
+    ON backtest_results(run_id);
 """
 
 

@@ -10,6 +10,8 @@ import time
 import signal
 import logging
 import json
+import queue
+import threading
 from pathlib import Path
 from datetime import datetime
 from dotenv import load_dotenv
@@ -61,6 +63,78 @@ def sighup_handler(signum, frame):
     logger.info("🔄 SIGHUP received — will reload config after current cycle")
     reload_config = True
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pair monitor + backtest worker threads
+# ─────────────────────────────────────────────────────────────────────────────
+
+_pair_queue: queue.Queue = queue.Queue(maxsize=500)
+_pair_monitor_stop: threading.Event = threading.Event()
+
+
+def _pair_monitor_loop() -> None:
+    """
+    Background daemon: poll DexScreener every 60s for boosted/new tokens
+    and push their addresses into _pair_queue for the backtest worker.
+    """
+    logger.info("🔭 Pair monitor thread started")
+    while not _pair_monitor_stop.wait(timeout=60):
+        try:
+            from src.data.dexscreener import get_boosted_tokens_latest
+            pairs = get_boosted_tokens_latest(limit=50) or []
+            added = 0
+            for pair in pairs:
+                addr = pair.get("baseToken", {}).get("address") or pair.get("address")
+                if addr and not _pair_queue.full():
+                    try:
+                        _pair_queue.put_nowait(addr)
+                        added += 1
+                    except queue.Full:
+                        break
+            if added:
+                logger.debug(f"Pair monitor: queued {added} token addresses for backtesting")
+        except Exception as e:
+            logger.warning(f"Pair monitor error: {e}")
+    logger.info("🔭 Pair monitor thread stopped")
+
+
+def _backtest_worker_loop() -> None:
+    """
+    Background daemon: consume token addresses from _pair_queue and run
+    parallel strategy backtests. Results persist to PostgreSQL and AstraDB.
+    """
+    logger.info("⚙️ Backtest worker thread started")
+    while not _pair_monitor_stop.is_set():
+        try:
+            token_address = _pair_queue.get(timeout=5)
+        except queue.Empty:
+            continue
+        try:
+            from src.backtesting.engine import run_parallel_backtests
+            from src.backtesting.strategies import list_strategies
+            from src.db.backtest_store import save_backtest_result
+            import uuid as _uuid
+
+            strategies = list_strategies()
+            results = run_parallel_backtests(
+                [token_address], strategies, days_back=7, max_workers=4
+            )
+            run_id = str(_uuid.uuid4())[:12]
+            saved = 0
+            for r in results:
+                if r.num_trades > 0:
+                    save_backtest_result(r, run_id=run_id, model_provider="daemon")
+                    saved += 1
+            if saved:
+                logger.info(
+                    f"Backtest worker: saved {saved} results for {token_address[:8]}... (run {run_id})"
+                )
+        except Exception as e:
+            logger.error(f"Backtest worker error for {token_address}: {e}")
+        finally:
+            _pair_queue.task_done()
+    logger.info("⚙️ Backtest worker thread stopped")
+
 def create_pid_file():
     """Create PID file to track daemon process"""
     pid_file = Path("agent_daemon.pid")
@@ -106,6 +180,18 @@ def run_agent_daemon():
         logger.info("=" * 80)
         logger.info("🚀 TRADING AGENT DAEMON STARTING")
         logger.info("=" * 80)
+
+        # Start background pair monitor + backtest worker threads
+        _pair_monitor_stop.clear()
+        _monitor_thread = threading.Thread(
+            target=_pair_monitor_loop, name="pair-monitor", daemon=True
+        )
+        _worker_thread = threading.Thread(
+            target=_backtest_worker_loop, name="backtest-worker", daemon=True
+        )
+        _monitor_thread.start()
+        _worker_thread.start()
+        logger.info("🔭 Background backtest threads started (pair monitor + worker)")
 
         # Load initial state
         state = load_agent_state() or create_initial_state()
@@ -247,6 +333,8 @@ def run_agent_daemon():
         raise
 
     finally:
+        # Stop background backtest threads
+        _pair_monitor_stop.set()
         remove_pid_file(pid_file)
         logger.info("👋 Agent daemon terminated")
 
