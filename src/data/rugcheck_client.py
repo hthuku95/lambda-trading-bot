@@ -66,10 +66,18 @@ class RugCheckClient:
         self.last_request_time = time.time()
     
     def check_api_health(self) -> Dict[str, Any]:
-        """Check RugCheck API health using the official /ping endpoint"""
+        """Check RugCheck API health using the token report summary endpoint.
+
+        The /ping endpoint does not exist in the RugCheck v1 API (returns 404).
+        We instead probe /tokens/{WSOL}/report/summary which is always available.
+        """
+        # Wrapped SOL — always exists, cheap to query
+        _PROBE_MINT = "So11111111111111111111111111111111111111112"
         try:
             start_time = datetime.now()
-            response = self.session.get(f"{self.base_url}/ping", timeout=10)
+            response = self.session.get(
+                f"{self.base_url}/tokens/{_PROBE_MINT}/report/summary", timeout=10
+            )
             response_time = (datetime.now() - start_time).total_seconds() * 1000
 
             if response.status_code == 200:

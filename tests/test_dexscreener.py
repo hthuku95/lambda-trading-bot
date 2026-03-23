@@ -1,7 +1,10 @@
 
 import pytest
+import time
 from datetime import datetime, timedelta
-from src.data.dexscreener import process_pair_data
+from unittest.mock import patch, MagicMock, call
+import requests
+from src.data.dexscreener import process_pair_data, make_api_call
 
 @pytest.fixture
 def sample_pair_data():
@@ -114,3 +117,150 @@ def test_process_pair_data_with_missing_fields():
     except Exception as e:
         pytest.fail(f"process_pair_data raised an exception with incomplete data: {e}")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# make_api_call() — retry logic and error handling
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestMakeApiCall:
+    def _mock_response(self, status_code=200, json_data=None):
+        resp = MagicMock()
+        resp.status_code = status_code
+        resp.json.return_value = json_data or {"data": "ok"}
+        if status_code >= 400:
+            resp.raise_for_status.side_effect = requests.HTTPError(
+                f"HTTP {status_code}", response=resp
+            )
+        else:
+            resp.raise_for_status.return_value = None
+        return resp
+
+    def test_returns_json_on_success(self):
+        good = self._mock_response(200, {"pairs": []})
+        with patch("requests.get", return_value=good), \
+             patch("time.sleep"):
+            result = make_api_call("https://api.test.com/endpoint")
+        assert result == {"pairs": []}
+
+    def test_returns_none_when_all_retries_fail(self):
+        bad = self._mock_response(500)
+        with patch("requests.get", return_value=bad), \
+             patch("time.sleep"):
+            result = make_api_call("https://api.test.com/fail", max_retries=3)
+        assert result is None
+
+    def test_retries_on_429_rate_limit(self):
+        rate_limited = self._mock_response(429)
+        success = self._mock_response(200, {"ok": True})
+        responses = [rate_limited, rate_limited, success]
+        with patch("requests.get", side_effect=responses), \
+             patch("time.sleep") as mock_sleep:
+            result = make_api_call("https://api.test.com/limited", max_retries=3)
+        assert result == {"ok": True}
+        # Must have slept at least once during the rate-limit retries
+        assert mock_sleep.call_count >= 1
+
+    def test_returns_none_on_connection_error(self):
+        with patch("requests.get", side_effect=requests.ConnectionError("no network")), \
+             patch("time.sleep"):
+            result = make_api_call("https://api.test.com/gone", max_retries=2)
+        assert result is None
+
+    def test_sleeps_between_retries_on_error(self):
+        bad = self._mock_response(500)
+        with patch("requests.get", return_value=bad), \
+             patch("time.sleep") as mock_sleep:
+            make_api_call("https://api.test.com/retry", max_retries=3)
+        # Should sleep between non-last retries (max_retries-1 times)
+        assert mock_sleep.call_count >= 1
+
+    def test_respects_max_retries_parameter(self):
+        """With max_retries=1 it must call requests.get exactly once."""
+        bad = self._mock_response(500)
+        with patch("requests.get", return_value=bad) as mock_get, \
+             patch("time.sleep"):
+            make_api_call("https://api.test.com/once", max_retries=1)
+        assert mock_get.call_count == 1
+
+    def test_returns_none_on_timeout(self):
+        with patch("requests.get", side_effect=requests.Timeout("timed out")), \
+             patch("time.sleep"):
+            result = make_api_call("https://api.test.com/slow", max_retries=2)
+        assert result is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# process_pair_data() — additional edge cases
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestProcessPairDataAdditional:
+    def test_liquidity_base_and_quote_extracted(self, sample_pair_data):
+        processed = process_pair_data(sample_pair_data)
+        assert processed["liquidity_base"] == pytest.approx(177935.0)
+        assert processed["liquidity_quote"] == pytest.approx(25000000.0)
+
+    def test_boosts_active_extracted(self, sample_pair_data):
+        processed = process_pair_data(sample_pair_data)
+        assert processed["boosts_active"] == 2
+
+    def test_labels_preserved(self, sample_pair_data):
+        processed = process_pair_data(sample_pair_data)
+        assert isinstance(processed["labels"], list)
+        assert len(processed["labels"]) == 2
+
+    def test_price_change_fields_present(self, sample_pair_data):
+        processed = process_pair_data(sample_pair_data)
+        assert processed["price_change_5m"] == pytest.approx(0.1)
+        assert processed["price_change_1h"] == pytest.approx(-1.5)
+        assert processed["price_change_24h"] == pytest.approx(5.2)
+
+    def test_buy_ratio_is_zero_point_five_when_no_transactions(self):
+        """No transactions → buy_ratio defaults to 0.5 (neutral)."""
+        data = {
+            "chainId": "solana",
+            "pairAddress": "abc",
+            "baseToken": {"address": "abc", "symbol": "TKN"},
+            "txns": {},
+        }
+        processed = process_pair_data(data)
+        assert processed["buy_ratio"] == pytest.approx(0.5)
+
+    def test_all_buy_sell_timeframes_aggregated(self):
+        """buy_count and sell_count must sum over all timeframes."""
+        data = {
+            "chainId": "solana",
+            "pairAddress": "abc",
+            "baseToken": {"address": "abc", "symbol": "TKN"},
+            "txns": {
+                "m5":  {"buys": 10, "sells": 5},
+                "h1":  {"buys": 20, "sells": 10},
+                "h6":  {"buys": 30, "sells": 15},
+                "h24": {"buys": 40, "sells": 20},
+            },
+        }
+        processed = process_pair_data(data)
+        assert processed["buy_count"] == 100
+        assert processed["sell_count"] == 50
+
+    def test_buyers_5m_and_sellers_5m_extracted(self, sample_pair_data):
+        """buyers_5m / sellers_5m come from the m5 timeframe."""
+        sample_pair_data["txns"]["m5"]["buyers"] = 7
+        sample_pair_data["txns"]["m5"]["sellers"] = 3
+        processed = process_pair_data(sample_pair_data)
+        assert processed["buyers_5m"] == 7
+        assert processed["sellers_5m"] == 3
+
+    def test_age_hours_zero_when_pairCreatedAt_missing(self):
+        data = {
+            "chainId": "solana",
+            "pairAddress": "abc",
+            "baseToken": {"address": "abc", "symbol": "TKN"},
+        }
+        processed = process_pair_data(data)
+        assert processed["age_hours"] == 0
+
+    def test_priceUsd_string_cast_to_float(self, sample_pair_data):
+        sample_pair_data["priceUsd"] = "99.99"
+        processed = process_pair_data(sample_pair_data)
+        assert isinstance(processed["price_usd"], float)
+        assert processed["price_usd"] == pytest.approx(99.99)

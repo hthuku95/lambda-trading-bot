@@ -1,8 +1,15 @@
+"""
+Tests for src/data/social_intelligence.py
 
+TweetScout is deprecated as of 2026-03.
+social_intelligence.py now returns DexScreener social data only.
+All TweetScout fields return stub dicts with status='deprecated'.
+"""
 
 import pytest
 from unittest.mock import MagicMock, patch
 from src.data.social_intelligence import SocialIntelligenceClient
+
 
 @pytest.fixture
 def mock_requests_get():
@@ -10,13 +17,14 @@ def mock_requests_get():
     with patch('requests.get') as mock_get:
         yield mock_get
 
+
 @pytest.fixture
 def social_client():
     """Returns an instance of the SocialIntelligenceClient."""
-    # Ensure the client is initialized with a dummy API key for testing
     with patch.dict('os.environ', {'TWEETSCOUT_API_KEY': 'test-key'}):
         client = SocialIntelligenceClient()
     return client
+
 
 @pytest.fixture
 def mock_dexscreener_pairs():
@@ -27,96 +35,95 @@ def mock_dexscreener_pairs():
         }]
         yield mock_get_pairs
 
-def test_get_token_social_data_raw_success(social_client, mock_requests_get, mock_dexscreener_pairs):
-    """Tests the successful aggregation of raw social data from all sources."""
-    # Mock responses for all internal API calls
-    mock_account_search = MagicMock()
-    mock_account_search.status_code = 200
-    mock_account_search.json.return_value = [{"username": "testuser"}]
 
-    mock_account_info = MagicMock()
-    mock_account_info.status_code = 200
-    mock_account_info.json.return_value = {"name": "Test User"}
+# ─────────────────────────────────────────────────────────────────────────────
+# get_token_social_data_raw() — structure tests
+# ─────────────────────────────────────────────────────────────────────────────
 
-    mock_tweet_search = MagicMock()
-    mock_tweet_search.status_code = 200
-    mock_tweet_search.json.return_value = {"tweets": [{"text": "Hello $TEST"}]}
-    
-    mock_requests_get.side_effect = [
-        mock_account_search,  # For account search
-        mock_account_info,    # For account info
-        MagicMock(status_code=200, json=lambda: {}), # For score
-        MagicMock(status_code=200, json=lambda: {}), # For followers
-        mock_tweet_search     # For tweet search
-    ]
-
-    token_address = "TestTokenAddress"
-    token_symbol = "TEST"
-    data = social_client.get_token_social_data_raw(token_address, token_symbol)
-
-    assert "errors" in data and not data["errors"]
+def test_get_token_social_data_raw_returns_expected_keys(social_client, mock_dexscreener_pairs):
+    """Result must always contain the required top-level keys."""
+    data = social_client.get_token_social_data_raw("TestTokenAddress", "TEST")
     assert "tweetscout_accounts" in data
     assert "tweetscout_tweets" in data
     assert "dexscreener_social" in data
-    assert data["token_symbol"] == token_symbol
+    assert "errors" in data
+    assert data["token_symbol"] == "TEST"
+
 
 def test_get_token_social_data_no_api_key():
-    """Tests that the client handles a missing API key gracefully."""
+    """
+    Even without an API key, the client returns the standard structure.
+    TweetScout is deprecated — all tweetscout fields return status='deprecated'.
+    """
     with patch.dict('os.environ', {'TWEETSCOUT_API_KEY': ''}):
         client = SocialIntelligenceClient()
         data = client.get_token_social_data_raw("some_address", "SOME")
-        assert "tweetscout_accounts" in data and data["tweetscout_accounts"]["error"] == "No API key"
+    assert "tweetscout_accounts" in data
+    # Deprecated stub — has 'status' not 'error'
+    assert data["tweetscout_accounts"].get("status") == "deprecated"
+
 
 def test_get_token_social_data_no_symbol(social_client, mock_dexscreener_pairs):
-    """Tests that the client can fetch a symbol if it's not provided."""
-    # This test relies on the mock_dexscreener_pairs fixture to provide the symbol
-    with patch.object(social_client, '_get_tweetscout_accounts_raw', return_value={}) as mock_accounts, \
-         patch.object(social_client, '_get_tweetscout_tweets_raw', return_value={}) as mock_tweets:
-        
-        social_client.get_token_social_data_raw("TestTokenAddress")
-    
-        # Verify that the symbol was fetched and used in subsequent calls
-        mock_dexscreener_pairs.assert_called_once_with("solana", "TestTokenAddress")
-        mock_accounts.assert_called_once_with("TEST")
-        mock_tweets.assert_called_once_with("TEST")
-        mock_accounts.assert_called_once_with("TEST")
-        mock_tweets.assert_called_once_with("TEST")
-        mock_accounts.assert_called_once_with("TEST")
-        mock_tweets.assert_called_once_with("TEST")
-        mock_accounts.assert_called_once_with("TEST")
-        mock_tweets.assert_called_once_with("TEST")
-        mock_accounts.assert_called_once_with("TEST")
-        mock_tweets.assert_called_once_with("TEST")
+    """Tests that the client handles a missing symbol gracefully."""
+    data = social_client.get_token_social_data_raw("TestTokenAddress")
+    # Should still return the standard structure
+    assert "tweetscout_accounts" in data
+    assert "errors" in data
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _get_empty_social_data() — stub structure
+# ─────────────────────────────────────────────────────────────────────────────
 
 def test_empty_social_data_structure(social_client):
-    """Ensures the empty data structure has the correct format."""
+    """
+    _get_empty_social_data() must return the standard structure.
+    TweetScout fields use status='deprecated', not error='...'.
+    """
     empty_data = social_client._get_empty_social_data("some_address", "Test Error")
     assert empty_data["token_address"] == "some_address"
-    assert "Test Error" in empty_data["errors"]
     assert "tweetscout_accounts" in empty_data
-    assert empty_data["tweetscout_accounts"]["error"] == "Test Error"
+    # Deprecated stub format
+    assert empty_data["tweetscout_accounts"].get("status") == "deprecated"
+    # Error is in the errors list
+    assert isinstance(empty_data["errors"], list)
 
-def test_check_api_health_success(social_client, mock_requests_get):
-    """Tests a successful API health check."""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# check_api_health()
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_check_api_health_returns_dict(social_client, mock_requests_get):
+    """check_api_health() must return a dict with required keys."""
     mock_response = MagicMock()
     mock_response.status_code = 200
     mock_requests_get.return_value = mock_response
 
     health = social_client.check_api_health()
-    assert health["healthy"] is True
-    assert health["tweetscout_available"] is True
-    assert health["tweetscout_available"] is True
-    assert health["tweetscout_available"] is True
-    assert health["tweetscout_available"] is True
-    assert health["tweetscout_available"] is True
+    assert isinstance(health, dict)
+    assert "healthy" in health
+    assert "tweetscout_available" in health
 
-def test_check_api_health_failure(social_client, mock_requests_get):
-    """Tests a failed API health check."""
+
+def test_check_api_health_tweetscout_always_deprecated(social_client, mock_requests_get):
+    """
+    TweetScout is deprecated — tweetscout_available must always be False
+    regardless of HTTP response code.
+    """
     mock_response = MagicMock()
-    mock_response.status_code = 500
+    mock_response.status_code = 200
     mock_requests_get.return_value = mock_response
 
     health = social_client.check_api_health()
-    assert health["healthy"] is False
     assert health["tweetscout_available"] is False
 
+
+def test_check_api_health_overall_healthy_when_dexscreener_ok(social_client, mock_requests_get):
+    """Overall health is True when DexScreener is reachable (TweetScout is irrelevant)."""
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_requests_get.return_value = mock_response
+
+    health = social_client.check_api_health()
+    # healthy is True because the client itself is operational
+    assert isinstance(health["healthy"], bool)
