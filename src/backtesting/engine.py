@@ -38,6 +38,8 @@ class BacktestResult:
     timeframe_start: int = 0   # unix timestamp
     timeframe_end: int = 0
     error: str = ""
+    market_regime: str = "unknown"   # bull | bear | sideways | volatile | unknown
+    interval_minutes: int = 5        # candle resolution this result was run on
 
 
 def _compute_sharpe(returns: list[float], periods_per_year: int = _PERIODS_PER_YEAR_5M) -> float:
@@ -68,6 +70,52 @@ def _compute_max_drawdown(equity_curve: list[float]) -> float:
     return max_dd
 
 
+def detect_market_regime(candles: list[dict]) -> str:
+    """
+    Classify a candle series into a market regime.
+
+    Returns one of: "bull" | "bear" | "sideways" | "volatile" | "unknown"
+
+    Uses the last 50 candles (or all candles if fewer):
+    - volatile : mean absolute per-candle return > 1.5%
+    - bull     : net price change > +15% over the window
+    - bear     : net price change < -15% over the window
+    - sideways : everything else
+    """
+    if len(candles) < 20:
+        return "unknown"
+
+    lookback = min(50, len(candles))
+    recent = candles[-lookback:]
+    closes = [c["close"] for c in recent]
+
+    # Mean absolute per-candle return (volatility proxy)
+    abs_returns: list[float] = []
+    for i in range(1, len(closes)):
+        if closes[i - 1] > 0:
+            abs_returns.append(abs(closes[i] - closes[i - 1]) / closes[i - 1])
+    avg_abs = sum(abs_returns) / len(abs_returns) if abs_returns else 0.0
+
+    # Net trend across the window
+    first_c = closes[0]
+    last_c = closes[-1]
+    trend = (last_c - first_c) / first_c if first_c > 0 else 0.0
+
+    if avg_abs > 0.015:       # >1.5% avg absolute move per candle
+        return "volatile"
+    if trend > 0.15:
+        return "bull"
+    if trend < -0.15:
+        return "bear"
+    return "sideways"
+
+
+def _annualisation_factor(interval_minutes: int) -> int:
+    """Periods per year for a given candle interval (trading 24/7 for crypto)."""
+    minutes_per_year = 365 * 24 * 60
+    return max(1, minutes_per_year // interval_minutes)
+
+
 def run_backtest(
     token_address: str,
     strategy_fn: Callable,
@@ -75,6 +123,7 @@ def run_backtest(
     token_symbol: str = "",
     initial_sol: float = 1.0,
     fee_bps: int = FEE_BPS_DEFAULT,
+    interval_minutes: int = 5,
 ) -> BacktestResult:
     """
     Simulate a single strategy against a candle series.
@@ -98,6 +147,7 @@ def run_backtest(
             best_trade_pct=0.0,
             worst_trade_pct=0.0,
             error="insufficient candles",
+            interval_minutes=interval_minutes,
         )
 
     fee_fraction = fee_bps / 10_000.0
@@ -118,7 +168,6 @@ def run_backtest(
         signal = strategy_fn(candles_so_far, position)
 
         if signal == "BUY" and position is None and balance > 0:
-            # Enter full position
             fee_cost = balance * fee_fraction
             invested = balance - fee_cost
             position = {
@@ -130,7 +179,6 @@ def run_backtest(
             balance = 0.0
 
         elif signal == "SELL" and position is not None:
-            # Exit position
             entry_price = position["entry_price"]
             entry_sol = position["entry_sol"]
             if entry_price > 0:
@@ -141,11 +189,7 @@ def run_backtest(
             gross_sol = entry_sol * (1.0 + price_return)
             fee_cost = gross_sol * fee_fraction
             exit_sol = gross_sol - fee_cost
-
-            trade_pnl_pct = (exit_sol - initial_sol * (entry_sol / initial_sol) * 1.0) / (entry_sol + 1e-12) - fee_fraction
-            # Simpler: just track net return relative to position size
             net_return = (exit_sol - entry_sol) / entry_sol if entry_sol > 0 else 0.0
-
             hold_minutes = (ts - position["entry_ts"]) / 60.0
 
             trade_log.append({
@@ -173,16 +217,13 @@ def run_backtest(
         price = candles[-1]["close"]
         entry_price = position["entry_price"]
         entry_sol = position["entry_sol"]
-        if entry_price > 0:
-            price_return = (price - entry_price) / entry_price
-        else:
-            price_return = 0.0
+        price_return = (price - entry_price) / entry_price if entry_price > 0 else 0.0
         gross_sol = entry_sol * (1.0 + price_return)
         fee_cost = gross_sol * fee_fraction
         exit_sol = gross_sol - fee_cost
         net_return = (exit_sol - entry_sol) / entry_sol if entry_sol > 0 else 0.0
-
         hold_minutes = (candles[-1]["timestamp"] - position["entry_ts"]) / 60.0
+
         trade_log.append({
             "trade_id": position["trade_id"],
             "token_address": token_address,
@@ -205,13 +246,16 @@ def run_backtest(
     win_rate = sum(1 for r in returns if r > 0) / num_trades if num_trades > 0 else 0.0
     total_return_pct = (balance - initial_sol) / initial_sol
     max_dd = _compute_max_drawdown(equity_curve)
-    sharpe = _compute_sharpe(returns)
+    ann_factor = _annualisation_factor(interval_minutes)
+    sharpe = _compute_sharpe(returns, periods_per_year=ann_factor)
 
     avg_hold = (
         sum(t["hold_minutes"] for t in trade_log) / num_trades if num_trades > 0 else 0.0
     )
     best_trade = max((t["profit_percentage"] for t in trade_log), default=0.0)
     worst_trade = min((t["profit_percentage"] for t in trade_log), default=0.0)
+
+    regime = detect_market_regime(candles)
 
     return BacktestResult(
         strategy_name=strategy_name,
@@ -228,6 +272,8 @@ def run_backtest(
         trade_log=trade_log,
         timeframe_start=timeframe_start,
         timeframe_end=timeframe_end,
+        market_regime=regime,
+        interval_minutes=interval_minutes,
     )
 
 
@@ -236,12 +282,12 @@ def run_parallel_backtests(
     strategy_names: list[str],
     days_back: int = 30,
     max_workers: int = 8,
+    interval_minutes: int = 5,
 ) -> list[BacktestResult]:
     """
     Run all token × strategy combos in parallel via ThreadPoolExecutor.
 
     Returns a flat list of BacktestResult objects (one per combo).
-    Targets 50+ simulated trades/hour.
     """
     from src.data.historical_data import fetch_ohlcv
     from src.backtesting.strategies import get_strategy
@@ -252,7 +298,7 @@ def run_parallel_backtests(
     ohlcv_map: dict[str, list[dict]] = {}
 
     def _fetch(addr: str) -> tuple[str, list[dict]]:
-        return addr, fetch_ohlcv(addr, days_back=days_back, interval_minutes=5)
+        return addr, fetch_ohlcv(addr, days_back=days_back, interval_minutes=interval_minutes)
 
     with ThreadPoolExecutor(max_workers=min(max_workers, len(token_addresses) or 1)) as ex:
         futs = {ex.submit(_fetch, addr): addr for addr in token_addresses}
@@ -274,7 +320,7 @@ def run_parallel_backtests(
     def _run_one(addr: str, name: str) -> BacktestResult:
         candles = ohlcv_map[addr]
         strategy_fn = get_strategy(name)
-        return run_backtest(addr, strategy_fn, candles)
+        return run_backtest(addr, strategy_fn, candles, interval_minutes=interval_minutes)
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futs = {ex.submit(_run_one, addr, name): (addr, name) for addr, name in combos}
@@ -298,6 +344,93 @@ def run_parallel_backtests(
                     best_trade_pct=0.0,
                     worst_trade_pct=0.0,
                     error=str(e),
+                    interval_minutes=interval_minutes,
+                ))
+
+    return results
+
+
+def run_multi_timeframe_backtests(
+    token_addresses: list[str],
+    strategy_names: list[str],
+    timeframes_minutes: list[int] | None = None,
+    days_back: int = 30,
+    max_workers: int = 8,
+) -> list[BacktestResult]:
+    """
+    Run all token × strategy × timeframe combos in parallel.
+
+    Each returned BacktestResult has interval_minutes and market_regime populated.
+    Using 3 timeframes × 24 strategies = 72x the context of a single-strategy run.
+
+    Args:
+        token_addresses:   Solana mint addresses to test
+        strategy_names:    Strategy names from the registry
+        timeframes_minutes: Candle intervals to test [default: 5, 15, 60]
+        days_back:         Historical window (same calendar window, different granularity)
+        max_workers:       Thread pool size
+    """
+    if timeframes_minutes is None:
+        timeframes_minutes = [5, 15, 60]
+
+    from src.data.historical_data import fetch_ohlcv
+    from src.backtesting.strategies import get_strategy
+
+    results: list[BacktestResult] = []
+
+    # Pre-fetch all (token, timeframe) combos in parallel (I/O bound)
+    ohlcv_map: dict[tuple[str, int], list[dict]] = {}
+    fetch_keys = [(addr, tf) for addr in token_addresses for tf in timeframes_minutes]
+
+    def _fetch(addr: str, tf: int) -> tuple[tuple[str, int], list[dict]]:
+        return (addr, tf), fetch_ohlcv(addr, days_back=days_back, interval_minutes=tf)
+
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(fetch_keys) or 1)) as ex:
+        futs = {ex.submit(_fetch, addr, tf): (addr, tf) for addr, tf in fetch_keys}
+        for fut in as_completed(futs):
+            try:
+                key, candles = fut.result()
+                if candles:
+                    ohlcv_map[key] = candles
+            except Exception as e:
+                logger.warning(f"Multi-TF OHLCV fetch error: {e}")
+
+    # Build and run all (token, strategy, timeframe) combos
+    combos = [
+        (addr, name, tf)
+        for addr in token_addresses
+        for name in strategy_names
+        for tf in timeframes_minutes
+        if (addr, tf) in ohlcv_map
+    ]
+
+    def _run_one(addr: str, name: str, tf: int) -> BacktestResult:
+        candles = ohlcv_map[(addr, tf)]
+        strategy_fn = get_strategy(name)
+        return run_backtest(addr, strategy_fn, candles, interval_minutes=tf)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = {ex.submit(_run_one, a, n, tf): (a, n, tf) for a, n, tf in combos}
+        for fut in as_completed(futs):
+            a, n, tf = futs[fut]
+            try:
+                results.append(fut.result())
+            except Exception as e:
+                logger.warning(f"Multi-TF backtest failed {a[:8]}/{n}/{tf}m: {e}")
+                results.append(BacktestResult(
+                    strategy_name=name,
+                    token_address=a,
+                    token_symbol="",
+                    num_trades=0,
+                    win_rate=0.0,
+                    total_return_pct=0.0,
+                    max_drawdown_pct=0.0,
+                    sharpe_ratio=0.0,
+                    avg_hold_minutes=0.0,
+                    best_trade_pct=0.0,
+                    worst_trade_pct=0.0,
+                    error=str(e),
+                    interval_minutes=tf,
                 ))
 
     return results

@@ -151,7 +151,10 @@ def save_backtest_result(result: Any, run_id: str, model_provider: str = "") -> 
             result.avg_hold_minutes,
             result.best_trade_pct,
             result.worst_trade_pct,
-            json.dumps({}),
+            json.dumps({
+                "market_regime": getattr(result, "market_regime", "unknown"),
+                "interval_minutes": getattr(result, "interval_minutes", 5),
+            }),
         )
         with _conn() as conn:
             with conn.cursor() as cur:
@@ -283,3 +286,74 @@ def get_backtest_run_summary(run_id: str) -> dict:
     except Exception as e:
         logger.error(f"get_backtest_run_summary error: {e}")
         return {}
+
+
+def get_strategy_performance_by_regime(regime: str = "", limit: int = 20) -> list[dict]:
+    """
+    Return strategy performance ranked by avg return, filtered by market regime.
+    Regime is stored in the parameters JSON column as parameters->>'market_regime'.
+
+    Args:
+        regime: "bull" | "bear" | "sideways" | "volatile" | "" (all regimes)
+        limit:  max rows returned
+    """
+    if not _avail():
+        return []
+    try:
+        if regime:
+            sql = """
+                SELECT strategy_name,
+                       parameters->>'market_regime' AS regime,
+                       parameters->>'interval_minutes' AS interval_min,
+                       COUNT(*) AS runs,
+                       AVG(total_return_pct) AS avg_return,
+                       AVG(win_rate) AS avg_win_rate,
+                       AVG(sharpe_ratio) AS avg_sharpe,
+                       AVG(max_drawdown_pct) AS avg_drawdown
+                FROM backtest_results
+                WHERE parameters->>'market_regime' = %s
+                  AND num_trades > 0
+                GROUP BY strategy_name, regime, interval_min
+                ORDER BY avg_return DESC
+                LIMIT %s
+            """
+            args = (regime, limit)
+        else:
+            sql = """
+                SELECT strategy_name,
+                       parameters->>'market_regime' AS regime,
+                       parameters->>'interval_minutes' AS interval_min,
+                       COUNT(*) AS runs,
+                       AVG(total_return_pct) AS avg_return,
+                       AVG(win_rate) AS avg_win_rate,
+                       AVG(sharpe_ratio) AS avg_sharpe,
+                       AVG(max_drawdown_pct) AS avg_drawdown
+                FROM backtest_results
+                WHERE num_trades > 0
+                GROUP BY strategy_name, regime, interval_min
+                ORDER BY avg_return DESC
+                LIMIT %s
+            """
+            args = (limit,)
+
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, args)
+                rows = cur.fetchall()
+
+        return [
+            {
+                "strategy_name": r[0],
+                "market_regime": r[1] or "unknown",
+                "interval_minutes": int(r[2] or 5),
+                "runs": r[3],
+                "avg_return_pct": round(float(r[4] or 0), 3),
+                "avg_win_rate": round(float(r[5] or 0), 4),
+                "avg_sharpe": round(float(r[6] or 0), 4),
+                "avg_drawdown_pct": round(float(r[7] or 0), 3),
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        logger.error(f"get_strategy_performance_by_regime error: {e}")
+        return []

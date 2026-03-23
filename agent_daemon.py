@@ -66,16 +66,37 @@ def sighup_handler(signum, frame):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Pair monitor + backtest worker threads
+#
+# Queue items are tuples: (token_address: str, days_back: int, timeframes: list[int])
+#   - Discovery monitors push fresh tokens: (addr, 7,  [5])          single TF, 7d
+#   - Nansen monitor pushes confirmed tokens: (addr, 7,  [5, 15])    2 TFs, 7d
+#   - Universe sweep pushes established tokens: (addr, 30, [5,15,60]) all TFs, 30d
 # ─────────────────────────────────────────────────────────────────────────────
 
-_pair_queue: queue.Queue = queue.Queue(maxsize=500)
+_pair_queue: queue.Queue = queue.Queue(maxsize=1000)
 _pair_monitor_stop: threading.Event = threading.Event()
+
+# ── Timeframe presets ────────────────────────────────────────────────────────
+_TF_FRESH = [5]            # new / unverified tokens: 5-min only
+_TF_STANDARD = [5, 15]     # smart-money confirmed: 5m + 15m
+_TF_DEEP = [5, 15, 60]     # universe sweep: all three timeframes
+
+
+def _enqueue(addr: str, days_back: int, timeframes: list[int]) -> bool:
+    """Put a (addr, days_back, timeframes) job into the queue. Returns True if added."""
+    if not addr or _pair_queue.full():
+        return False
+    try:
+        _pair_queue.put_nowait((addr, days_back, timeframes))
+        return True
+    except queue.Full:
+        return False
 
 
 def _pair_monitor_loop() -> None:
     """
-    Background daemon: poll DexScreener every 60s for boosted/new tokens
-    and push their addresses into _pair_queue for the backtest worker.
+    Background daemon: poll DexScreener every 60s for boosted/new tokens.
+    Fresh tokens get 7-day single-timeframe jobs (minimal history available).
     """
     logger.info("🔭 Pair monitor thread started")
     while not _pair_monitor_stop.wait(timeout=60):
@@ -85,14 +106,10 @@ def _pair_monitor_loop() -> None:
             added = 0
             for pair in pairs:
                 addr = pair.get("baseToken", {}).get("address") or pair.get("address")
-                if addr and not _pair_queue.full():
-                    try:
-                        _pair_queue.put_nowait(addr)
-                        added += 1
-                    except queue.Full:
-                        break
+                if _enqueue(addr, 7, _TF_FRESH):
+                    added += 1
             if added:
-                logger.debug(f"Pair monitor: queued {added} token addresses for backtesting")
+                logger.debug(f"Pair monitor: queued {added} tokens (7d/5m)")
         except Exception as e:
             logger.warning(f"Pair monitor error: {e}")
     logger.info("🔭 Pair monitor thread stopped")
@@ -100,10 +117,8 @@ def _pair_monitor_loop() -> None:
 
 def _nansen_monitor_loop() -> None:
     """
-    Background daemon: poll Nansen token screener every 5 minutes for Solana
-    tokens with active smart money buying. Feeds addresses into _pair_queue
-    for backtesting — these are higher-quality targets than pure DexScreener
-    boosts because they represent real institutional/smart wallet conviction.
+    Background daemon: poll Nansen token screener every 5 minutes.
+    Smart-money confirmed tokens get dual-timeframe (5m + 15m) jobs.
     """
     logger.info("💡 Nansen monitor thread started (smart money screener, 5min interval)")
     while not _pair_monitor_stop.wait(timeout=300):
@@ -116,14 +131,10 @@ def _nansen_monitor_loop() -> None:
             added = 0
             for token in tokens:
                 addr = token.get("token_address")
-                if addr and not _pair_queue.full():
-                    try:
-                        _pair_queue.put_nowait(addr)
-                        added += 1
-                    except queue.Full:
-                        break
+                if _enqueue(addr, 7, _TF_STANDARD):
+                    added += 1
             if added:
-                logger.info(f"Nansen monitor: queued {added} smart money tokens for backtesting")
+                logger.info(f"Nansen monitor: queued {added} smart money tokens (7d/5m+15m)")
         except Exception as e:
             logger.warning(f"Nansen monitor error: {e}")
     logger.info("💡 Nansen monitor thread stopped")
@@ -131,10 +142,8 @@ def _nansen_monitor_loop() -> None:
 
 def _new_token_monitor_loop() -> None:
     """
-    Background daemon: poll RugCheck /stats/new_tokens every 15s for freshly
-    created tokens and push them into _pair_queue for backtesting.
-    Runs at 4× the cadence of the DexScreener boosted-token poll so newly
-    launched tokens enter the backtest pipeline within seconds of discovery.
+    Background daemon: poll RugCheck /stats/new_tokens every 15s.
+    Very fresh tokens: 7-day 5-min jobs only.
     """
     logger.info("🆕 New token monitor thread started (RugCheck, 15s interval)")
     while not _pair_monitor_stop.wait(timeout=15):
@@ -146,81 +155,155 @@ def _new_token_monitor_loop() -> None:
             added = 0
             for token in tokens[:30]:
                 addr = token.get("mint") or token.get("address") or token.get("token")
-                if addr and not _pair_queue.full():
-                    try:
-                        _pair_queue.put_nowait(addr)
-                        added += 1
-                    except queue.Full:
-                        break
+                if _enqueue(addr, 7, _TF_FRESH):
+                    added += 1
             if added:
-                logger.debug(f"New token monitor: queued {added} fresh tokens for backtesting")
+                logger.debug(f"New token monitor: queued {added} fresh tokens (7d/5m)")
         except Exception as e:
             logger.warning(f"New token monitor error: {e}")
     logger.info("🆕 New token monitor thread stopped")
 
 
+def _universe_sweep_loop() -> None:
+    """
+    Background sweep: every hour, fetch the top 200 Solana tokens by volume/boost
+    from DexScreener and queue them for deep multi-timeframe backtesting.
+
+    These are established tokens with enough history for 30-day backtests across
+    5m, 15m, and 60m timeframes — generating ~72× more compressed context per token
+    than a single-strategy 7-day run.  The sweep rotates continuously, so the agent's
+    AstraDB memory converges on the full Solana memecoin universe over time.
+    """
+    logger.info("🌐 Universe sweep thread started (top-200 tokens, 30d / 5m+15m+60m, 1hr cycle)")
+    while not _pair_monitor_stop.wait(timeout=3600):
+        try:
+            from src.data.dexscreener import get_boosted_tokens_top, get_latest_token_profiles
+            universe: set[str] = set()
+
+            # Top boosted tokens (highest promotion = most active)
+            try:
+                boosted = get_boosted_tokens_top(limit=100) or []
+                for p in boosted:
+                    addr = p.get("baseToken", {}).get("address") or p.get("address")
+                    if addr:
+                        universe.add(addr)
+            except Exception as e:
+                logger.debug(f"Universe sweep: boosted fetch error: {e}")
+
+            # Latest token profiles (recent listings with established pools)
+            try:
+                profiles = get_latest_token_profiles() or []
+                for p in profiles[:100]:
+                    addr = p.get("address")
+                    if addr:
+                        universe.add(addr)
+            except Exception as e:
+                logger.debug(f"Universe sweep: profiles fetch error: {e}")
+
+            added = 0
+            for addr in universe:
+                if _enqueue(addr, 30, _TF_DEEP):
+                    added += 1
+
+            logger.info(
+                f"🌐 Universe sweep: queued {added}/{len(universe)} tokens "
+                f"for deep backtest (30d × 5m/15m/60m × 24 strategies)"
+            )
+        except Exception as e:
+            logger.warning(f"Universe sweep error: {e}")
+    logger.info("🌐 Universe sweep thread stopped")
+
+
 def _backtest_worker_loop() -> None:
     """
-    Background daemon: consume token addresses from _pair_queue and run
-    parallel strategy backtests. Results persist to PostgreSQL and AstraDB.
+    Background daemon: consume (token_address, days_back, timeframes) jobs from
+    _pair_queue and run multi-timeframe parallel strategy backtests.
+
+    Results persist to PostgreSQL (with market_regime + interval_minutes metadata)
+    and AstraDB (with regime-tagged experience documents for retrieval).
+
+    Throughput: 24 strategies × up to 3 timeframes per token = 72 backtests/token.
     """
-    logger.info("⚙️ Backtest worker thread started")
+    logger.info("⚙️ Backtest worker thread started (24 strategies, multi-timeframe)")
     while not _pair_monitor_stop.is_set():
         try:
-            token_address = _pair_queue.get(timeout=5)
+            item = _pair_queue.get(timeout=5)
         except queue.Empty:
             continue
+
+        # Unpack queue item — support both old str format and new tuple format
+        if isinstance(item, tuple):
+            token_address, days_back, timeframes = item
+        else:
+            token_address, days_back, timeframes = item, 7, _TF_FRESH
+
         try:
-            from src.backtesting.engine import run_parallel_backtests
+            from src.backtesting.engine import run_multi_timeframe_backtests, run_parallel_backtests
             from src.backtesting.strategies import list_strategies
             from src.db.backtest_store import save_backtest_result
             import uuid as _uuid
 
-            strategies = list_strategies()
-            results = run_parallel_backtests(
-                [token_address], strategies, days_back=7, max_workers=4
-            )
+            strategies = list_strategies()  # all 24 strategies
             run_id = str(_uuid.uuid4())[:12]
+
+            # Use multi-timeframe runner when multiple TFs requested
+            if len(timeframes) > 1:
+                results = run_multi_timeframe_backtests(
+                    [token_address], strategies, timeframes, days_back=days_back, max_workers=4
+                )
+            else:
+                results = run_parallel_backtests(
+                    [token_address], strategies, days_back=days_back,
+                    max_workers=4, interval_minutes=timeframes[0]
+                )
+
             saved = 0
             vectorized = 0
             for r in results:
-                if r.num_trades > 0:
-                    save_backtest_result(r, run_id=run_id, model_provider="daemon")
-                    saved += 1
-                    # Vectorize into AstraDB so agents can learn from daemon backtests
-                    try:
-                        from src.memory.astra_vector_store import add_trading_experience
-                        experience = {
-                            "model_provider": "daemon",
-                            "trade_type": "backtest",
-                            "strategy_name": r.strategy_name,
-                            "token_symbol": r.token_symbol,
-                            "total_return_pct": r.total_return_pct,
-                            "win_rate": r.win_rate,
-                            "num_trades": r.num_trades,
-                            "sharpe_ratio": r.sharpe_ratio,
-                            "max_drawdown_pct": r.max_drawdown_pct,
-                            "avg_hold_minutes": r.avg_hold_minutes,
-                            "best_trade_pct": r.best_trade_pct,
-                            "worst_trade_pct": r.worst_trade_pct,
-                            "days_back": 7,
-                            "run_id": run_id,
-                            "ai_reasoning": (
-                                f"Daemon backtest {r.strategy_name} on {r.token_symbol}: "
-                                f"{r.total_return_pct:.1f}% return, "
-                                f"{r.win_rate:.0%} win rate, "
-                                f"{r.num_trades} trades"
-                            ),
-                            "timestamp": datetime.now().isoformat(),
-                        }
-                        add_trading_experience(token_address, experience)
-                        vectorized += 1
-                    except Exception as vec_err:
-                        logger.debug(f"AstraDB vectorize skipped for {token_address[:8]}...: {vec_err}")
+                if r.num_trades == 0:
+                    continue
+                save_backtest_result(r, run_id=run_id, model_provider="daemon")
+                saved += 1
+
+                # Vectorize into AstraDB — include market_regime for context-aware retrieval
+                try:
+                    from src.memory.astra_vector_store import add_trading_experience
+                    experience = {
+                        "model_provider": "daemon",
+                        "trade_type": "backtest",
+                        "strategy_name": r.strategy_name,
+                        "token_symbol": r.token_symbol,
+                        "total_return_pct": r.total_return_pct,
+                        "win_rate": r.win_rate,
+                        "num_trades": r.num_trades,
+                        "sharpe_ratio": r.sharpe_ratio,
+                        "max_drawdown_pct": r.max_drawdown_pct,
+                        "avg_hold_minutes": r.avg_hold_minutes,
+                        "best_trade_pct": r.best_trade_pct,
+                        "worst_trade_pct": r.worst_trade_pct,
+                        "market_regime": r.market_regime,
+                        "interval_minutes": r.interval_minutes,
+                        "days_back": days_back,
+                        "run_id": run_id,
+                        "ai_reasoning": (
+                            f"Daemon backtest {r.strategy_name} on {r.token_symbol} "
+                            f"[{r.market_regime} regime, {r.interval_minutes}m candles]: "
+                            f"{r.total_return_pct:.1f}% return, "
+                            f"{r.win_rate:.0%} win rate, "
+                            f"{r.num_trades} trades over {days_back}d"
+                        ),
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                    add_trading_experience(token_address, experience)
+                    vectorized += 1
+                except Exception as vec_err:
+                    logger.debug(f"AstraDB vectorize skipped for {token_address[:8]}...: {vec_err}")
+
             if saved:
+                tfs_str = "+".join(f"{tf}m" for tf in timeframes)
                 logger.info(
-                    f"Backtest worker: saved {saved} results for {token_address[:8]}... "
-                    f"(run {run_id}, {vectorized} vectorized to AstraDB)"
+                    f"Backtest worker: {saved} results for {token_address[:8]}... "
+                    f"[{tfs_str}, {days_back}d, run {run_id}, {vectorized} → AstraDB]"
                 )
         except Exception as e:
             logger.error(f"Backtest worker error for {token_address}: {e}")
@@ -285,17 +368,22 @@ def run_agent_daemon():
         _nansen_thread = threading.Thread(
             target=_nansen_monitor_loop, name="nansen-monitor", daemon=True
         )
+        _universe_thread = threading.Thread(
+            target=_universe_sweep_loop, name="universe-sweep", daemon=True
+        )
         _worker_thread = threading.Thread(
             target=_backtest_worker_loop, name="backtest-worker", daemon=True
         )
         _monitor_thread.start()
         _new_token_thread.start()
         _nansen_thread.start()
+        _universe_thread.start()
         _worker_thread.start()
         logger.info(
-            "🔭 Background discovery threads started: "
+            "🔭 Background threads started: "
             "DexScreener boosted (60s) | RugCheck new tokens (15s) | "
-            "Nansen smart money (5min) | backtest worker"
+            "Nansen smart money (5min) | Universe sweep (1hr, 30d/3TFs) | "
+            "Backtest worker (24 strategies × multi-timeframe)"
         )
 
         # Load initial state

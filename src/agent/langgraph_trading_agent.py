@@ -1183,6 +1183,147 @@ def get_best_strategy_tool(token_address: str = "") -> str:
         return str({"success": False, "error": str(e)})
 
 
+@tool
+def run_deep_backtest_tool(
+    token_address: str,
+    days_back: int = 30,
+) -> str:
+    """
+    Run all 24 strategy variants across three timeframes (5m, 15m, 60m) against
+    a token's full historical data. Returns top performers grouped by timeframe
+    and market regime. Use this before entering a position on a new token to get
+    maximum compressed context — 72 simulations instead of 6.
+
+    Args:
+        token_address: Solana token mint address
+        days_back: Historical window in days (default 30; new tokens may have less)
+    """
+    try:
+        import uuid as _uuid
+        from src.backtesting.engine import run_multi_timeframe_backtests
+        from src.backtesting.strategies import list_strategies
+        from src.db.backtest_store import save_backtest_result
+
+        run_id = str(_uuid.uuid4())[:12]
+        strategies = list_strategies()
+        timeframes = [5, 15, 60]
+
+        results = run_multi_timeframe_backtests(
+            [token_address], strategies, timeframes, days_back=days_back, max_workers=6
+        )
+
+        # Persist all results and build summary
+        by_timeframe: dict[int, list[dict]] = {tf: [] for tf in timeframes}
+        by_regime: dict[str, list[dict]] = {}
+
+        for r in results:
+            save_backtest_result(r, run_id=run_id, model_provider=_current_model_provider)
+
+            if r.num_trades > 0:
+                row = {
+                    "strategy": r.strategy_name,
+                    "return_pct": r.total_return_pct,
+                    "win_rate_pct": round(r.win_rate * 100, 1),
+                    "sharpe": r.sharpe_ratio,
+                    "trades": r.num_trades,
+                    "regime": r.market_regime,
+                }
+                by_timeframe[r.interval_minutes].append(row)
+                by_regime.setdefault(r.market_regime, []).append(row)
+
+                # Vectorize to AstraDB with regime metadata
+                try:
+                    add_trading_experience(token_address, {
+                        "model_provider": _current_model_provider,
+                        "trade_type": "deep_backtest",
+                        "strategy_name": r.strategy_name,
+                        "token_symbol": r.token_symbol,
+                        "total_return_pct": r.total_return_pct,
+                        "win_rate": r.win_rate,
+                        "num_trades": r.num_trades,
+                        "sharpe_ratio": r.sharpe_ratio,
+                        "max_drawdown_pct": r.max_drawdown_pct,
+                        "avg_hold_minutes": r.avg_hold_minutes,
+                        "market_regime": r.market_regime,
+                        "interval_minutes": r.interval_minutes,
+                        "days_back": days_back,
+                        "run_id": run_id,
+                        "ai_reasoning": (
+                            f"Deep backtest {r.strategy_name} [{r.interval_minutes}m, "
+                            f"{r.market_regime}]: {r.total_return_pct:.1f}% return, "
+                            f"{r.win_rate:.0%} win rate over {days_back}d"
+                        ),
+                        "timestamp": datetime.now().isoformat(),
+                    })
+                except Exception:
+                    pass
+
+        # Sort each timeframe bucket by return
+        for tf in timeframes:
+            by_timeframe[tf].sort(key=lambda x: x["return_pct"], reverse=True)
+        for reg in by_regime:
+            by_regime[reg].sort(key=lambda x: x["return_pct"], reverse=True)
+
+        # Top 3 per timeframe
+        top_by_tf = {
+            f"{tf}m": by_timeframe[tf][:3] for tf in timeframes
+        }
+
+        # Detected regime (use most common across results)
+        detected_regime = max(by_regime, key=lambda r: len(by_regime[r])) if by_regime else "unknown"
+        best_for_regime = by_regime.get(detected_regime, [])[:3]
+
+        summary = {
+            "success": True,
+            "token_address": token_address,
+            "days_back": days_back,
+            "run_id": run_id,
+            "total_simulations": len(results),
+            "detected_regime": detected_regime,
+            "top_strategies_by_timeframe": top_by_tf,
+            "top_strategies_for_current_regime": best_for_regime,
+            "recommendation": (
+                best_for_regime[0]["strategy"] if best_for_regime
+                else (by_timeframe[5][:1][0]["strategy"] if by_timeframe[5] else "no data")
+            ),
+        }
+        out = str(summary)
+        return out[:4000] + "\n...[truncated]" if len(out) > 4000 else out
+    except Exception as e:
+        logger.error(f"run_deep_backtest_tool error: {e}")
+        return str({"success": False, "error": str(e)})
+
+
+@tool
+def get_strategy_by_regime_tool(regime: str = "") -> str:
+    """
+    Query historical backtest database for strategy performance grouped by market regime.
+    Returns which strategies perform best in bull / bear / sideways / volatile markets.
+    Use this to pick the right strategy for the current market conditions.
+
+    Args:
+        regime: "bull" | "bear" | "sideways" | "volatile" | "" (all regimes)
+    """
+    try:
+        from src.db.backtest_store import get_strategy_performance_by_regime
+        regime_clean = regime.strip().lower()
+        data = get_strategy_performance_by_regime(regime=regime_clean, limit=20)
+        result = {
+            "success": True,
+            "regime_filter": regime_clean or "all",
+            "strategy_rankings": data,
+            "tip": (
+                "Use run_deep_backtest_tool to populate this database for a specific token. "
+                "The regime column tells you under what market conditions each strategy thrives."
+            ),
+        }
+        out = str(result)
+        return out[:4000] + "\n...[truncated]" if len(out) > 4000 else out
+    except Exception as e:
+        logger.error(f"get_strategy_by_regime_tool error: {e}")
+        return str({"success": False, "error": str(e)})
+
+
 # ============================================================================
 # Custom LangGraph Node Functions (Standalone)
 # ============================================================================
@@ -1279,6 +1420,7 @@ class CompleteLangGraphTradingAgent:
             # Backtesting tools
             fetch_token_ohlcv_tool, run_strategy_backtest_tool,
             compare_strategies_backtest_tool, get_best_strategy_tool,
+            run_deep_backtest_tool, get_strategy_by_regime_tool,
         ]
 
     def _build_graph(self):
