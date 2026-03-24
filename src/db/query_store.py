@@ -385,3 +385,173 @@ def get_error_summary(hours: int = 24) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"get_error_summary error: {e}")
         return {}
+
+
+# ─────────────────────────────────────────────────────────────
+# State restoration (used on startup when agent_state.json is missing)
+# ─────────────────────────────────────────────────────────────
+
+def restore_state_from_db(model_provider: str = None) -> Optional[Dict[str, Any]]:
+    """
+    Restore full agent state from PostgreSQL when agent_state.json is missing
+    (e.g. after a Render redeploy wipes the container filesystem).
+
+    Strategy:
+      1. Load the most recent agent_state_snapshots row (state_json contains
+         active_positions, transaction_history, agent_parameters, etc.)
+      2. Overlay live open positions from the positions table (authoritative
+         source for what is actually open, even if the snapshot is slightly stale)
+      3. Overlay the exact cycles_completed count from trading_cycles
+      4. Return a dict compatible with AgentState — caller should immediately
+         write it back to agent_state.json so subsequent loads are from disk.
+
+    Returns None if DB is unavailable or has no snapshots yet.
+    """
+    if not is_available():
+        return None
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+
+                # ── 1. Latest snapshot ──────────────────────────────────────
+                if model_provider:
+                    cur.execute(
+                        """
+                        SELECT state_json, cycles_completed, wallet_balance_sol,
+                               total_profit_sol, win_rate, sharpe_ratio, max_drawdown,
+                               total_trades, successful_trades, trading_mode,
+                               model_provider, timestamp
+                        FROM agent_state_snapshots
+                        WHERE model_provider = %s
+                        ORDER BY timestamp DESC LIMIT 1
+                        """,
+                        (model_provider,),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT state_json, cycles_completed, wallet_balance_sol,
+                               total_profit_sol, win_rate, sharpe_ratio, max_drawdown,
+                               total_trades, successful_trades, trading_mode,
+                               model_provider, timestamp
+                        FROM agent_state_snapshots
+                        ORDER BY timestamp DESC LIMIT 1
+                        """
+                    )
+                row = cur.fetchone()
+                if not row:
+                    logger.info("restore_state_from_db: no snapshots found in DB")
+                    return None
+
+                (state_json, cycles_completed, wallet_balance_sol,
+                 total_profit_sol, win_rate, sharpe_ratio, max_drawdown,
+                 total_trades, successful_trades, trading_mode,
+                 provider, snapshot_ts) = row
+
+                if not state_json:
+                    return None
+
+                # psycopg2 returns JSONB as dict already; guard against string
+                if isinstance(state_json, str):
+                    state = json.loads(state_json)
+                else:
+                    state = dict(state_json)
+
+                # ── 2. Overlay authoritative open positions ──────────────────
+                cur.execute(
+                    """
+                    SELECT position_id, token_address, token_symbol,
+                           entry_time, amount, position_size_sol,
+                           entry_price_usd, entry_ai_score, entry_safety_score,
+                           entry_reasoning, strategy, risk_level
+                    FROM positions
+                    WHERE status = 'open'
+                    AND model_provider = %s
+                    ORDER BY entry_time ASC
+                    """,
+                    (provider,),
+                )
+                cols = [d[0] for d in cur.description]
+                open_rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+                if open_rows:
+                    rebuilt = []
+                    for p in open_rows:
+                        entry_t = p["entry_time"]
+                        entry_iso = (
+                            entry_t.isoformat()
+                            if hasattr(entry_t, "isoformat")
+                            else str(entry_t)
+                        )
+                        rebuilt.append({
+                            "position_id": p["position_id"],
+                            "token_address": p["token_address"],
+                            "token_symbol": p["token_symbol"] or "",
+                            "entry_time": entry_iso,
+                            "amount": p["amount"] or 0,
+                            "position_size_sol": p["position_size_sol"] or 0,
+                            "entry_price_usd": p["entry_price_usd"] or 0,
+                            "current_price_usd": p["entry_price_usd"] or 0,  # stale; refreshed next cycle
+                            "current_value_sol": p["position_size_sol"] or 0,
+                            "current_value_usd": 0,
+                            "unrealized_profit_sol": 0,
+                            "current_profit_percentage": 0,
+                            "entry_ai_score": p["entry_ai_score"] or 0,
+                            "entry_safety_score": p["entry_safety_score"] or 0,
+                            "entry_reasoning": p["entry_reasoning"] or "",
+                            "strategy": p["strategy"] or "",
+                            "risk_level": p["risk_level"] or "unknown",
+                        })
+                    state["active_positions"] = rebuilt
+                else:
+                    # No open positions in DB → clear the list (positions were closed
+                    # between the snapshot and now, or there never were any)
+                    state["active_positions"] = []
+
+                # ── 3. Authoritative cycle count ────────────────────────────
+                cur.execute(
+                    """
+                    SELECT COUNT(*) FROM trading_cycles
+                    WHERE session_id IN (
+                        SELECT id FROM trading_sessions WHERE model_provider = %s
+                    )
+                    """,
+                    (provider,),
+                )
+                db_cycles = cur.fetchone()[0] or 0
+                state["cycles_completed"] = max(db_cycles, cycles_completed or 0)
+
+                # ── 4. Overlay scalar metrics from snapshot row ─────────────
+                if wallet_balance_sol is not None:
+                    state["wallet_balance_sol"] = wallet_balance_sol
+                pm = state.setdefault("portfolio_metrics", {})
+                if win_rate is not None:
+                    pm["win_rate"] = win_rate
+                if sharpe_ratio is not None:
+                    pm["sharpe_ratio"] = sharpe_ratio
+                if max_drawdown is not None:
+                    pm["max_drawdown"] = max_drawdown
+                if total_profit_sol is not None:
+                    pm["total_profit_sol"] = total_profit_sol
+                if total_trades is not None:
+                    pm["total_closed_trades"] = total_trades
+                if successful_trades is not None:
+                    pm["successful_trades"] = successful_trades
+
+                # Preserve trading_mode from snapshot so dry/live persists
+                if trading_mode:
+                    state["trading_mode"] = trading_mode
+                    ap = state.setdefault("agent_parameters", {})
+                    ap.setdefault("trading_mode", trading_mode)
+
+                logger.info(
+                    f"State restored from PostgreSQL snapshot "
+                    f"(provider={provider}, ts={snapshot_ts}, "
+                    f"cycles={state['cycles_completed']}, "
+                    f"open_positions={len(state['active_positions'])})"
+                )
+                return state
+
+    except Exception as e:
+        logger.error(f"restore_state_from_db error: {e}")
+        return None

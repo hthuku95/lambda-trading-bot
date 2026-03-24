@@ -66,10 +66,39 @@ class AgentChatInterface:
             self.agent = None
 
     def _initialize_chat_history(self):
-        """Initialize chat history for this agent"""
+        """Initialize chat history, restoring from PostgreSQL if available."""
         global _chat_histories
         if self.model_provider not in _chat_histories:
-            _chat_histories[self.model_provider] = InMemoryChatMessageHistory()
+            history = InMemoryChatMessageHistory()
+            # Try to restore recent messages from PostgreSQL
+            try:
+                from src.db.query_store import get_conn, is_available
+                if is_available():
+                    from src.db.connection import get_conn as _get_conn
+                    with _get_conn() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                """
+                                SELECT role, content FROM chat_messages
+                                WHERE model_provider = %s
+                                ORDER BY timestamp DESC LIMIT 20
+                                """,
+                                (self.model_provider,),
+                            )
+                            rows = list(reversed(cur.fetchall()))
+                    for role, content in rows:
+                        if role == "user":
+                            history.add_user_message(content)
+                        elif role == "assistant":
+                            history.add_ai_message(content)
+                    if rows:
+                        logger.info(
+                            f"Chat history restored from DB: {len(rows)} messages "
+                            f"for {self.model_provider}"
+                        )
+            except Exception as e:
+                logger.debug(f"Chat history DB restore skipped: {e}")
+            _chat_histories[self.model_provider] = history
         self.chat_history = _chat_histories[self.model_provider]
 
     def _get_recent_messages(self, limit: int = None) -> List:
@@ -362,11 +391,19 @@ to find which strategy actually works for that specific token in the current reg
             else:
                 response_text = str(response)
 
-            # Save to chat history
+            # Save to in-memory chat history
             self.chat_history.add_user_message(user_message)
             self.chat_history.add_ai_message(response_text)
 
-            # Auto-save history periodically (every 5 messages)
+            # Persist both messages to PostgreSQL (non-fatal)
+            try:
+                from src.db.trade_store import save_chat_message
+                save_chat_message(self.model_provider, "user", user_message)
+                save_chat_message(self.model_provider, "assistant", response_text)
+            except Exception:
+                pass
+
+            # Auto-save history to file periodically (every 10 messages)
             if len(self.chat_history.messages) % 10 == 0:
                 self.save_history_to_file()
 

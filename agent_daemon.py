@@ -430,7 +430,7 @@ def run_agent_daemon():
             if reload_config:
                 reload_config = False
                 load_dotenv(override=True)
-                state = load_agent_state() or state
+                state = load_agent_state(model_provider=model_provider) or state
                 parameters = state.get("agent_parameters", {})
                 new_cycle_time = parameters.get("cycle_time_seconds", 180)
                 if new_cycle_time != cycle_time:

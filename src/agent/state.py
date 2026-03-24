@@ -611,8 +611,19 @@ def save_agent_state(state: AgentState, filename: str = None) -> bool:
             logger.error(f"Error saving agent state: {e}")
             return False
 
-def load_agent_state(filename: str = None) -> Optional[AgentState]:
-    """Load the modern agent state from disk in a thread-safe manner."""
+def load_agent_state(filename: str = None, model_provider: str = None) -> Optional[AgentState]:
+    """
+    Load agent state, with automatic PostgreSQL fallback.
+
+    Priority:
+      1. Local JSON file (fast, always up-to-date while the container is running)
+      2. PostgreSQL agent_state_snapshots (used after a Render redeploy wipes the
+         container filesystem — recovers positions, history, and metrics)
+      3. Returns None so the caller can fall back to create_initial_state()
+
+    When state is restored from DB the file is immediately re-written so that
+    subsequent loads within the same session hit disk, not the DB.
+    """
     import json
     import logging
 
@@ -622,20 +633,40 @@ def load_agent_state(filename: str = None) -> Optional[AgentState]:
     logger = logging.getLogger("trading_agent.state")
 
     with get_state_lock():
+        # ── 1. Try local file ──────────────────────────────────────────────
         try:
             if os.path.exists(filename):
                 with open(filename, "r") as f:
                     data = json.load(f)
-                
                 logger.info(f"Agent state loaded from {filename}")
                 return data
-            else:
-                logger.info(f"No saved state found at {filename}, will create new state")
-                return None
-                
         except Exception as e:
-            logger.error(f"Error loading agent state: {e}")
-            return None
+            logger.error(f"Error reading state file {filename}: {e}")
+
+        # ── 2. File missing or unreadable — try PostgreSQL ─────────────────
+        logger.warning(
+            f"State file not found at {filename} — attempting PostgreSQL restore"
+        )
+        try:
+            from src.db.query_store import restore_state_from_db
+            db_state = restore_state_from_db(model_provider)
+            if db_state is not None:
+                # Immediately persist to disk so this session uses the file path
+                try:
+                    tmp = filename + ".tmp"
+                    with open(tmp, "w") as f:
+                        json.dump(db_state, f, indent=2)
+                    os.replace(tmp, filename)
+                    logger.info(f"Restored state written back to {filename}")
+                except Exception as write_err:
+                    logger.warning(f"Could not write restored state to disk: {write_err}")
+                return db_state
+        except Exception as e:
+            logger.error(f"PostgreSQL state restore failed: {e}")
+
+        # ── 3. Nothing found ───────────────────────────────────────────────
+        logger.info("No saved state found in file or DB — caller should create_initial_state()")
+        return None
 
 def migrate_legacy_state(legacy_state: Dict[str, Any]) -> AgentState:
     """
