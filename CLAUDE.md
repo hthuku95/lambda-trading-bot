@@ -23,23 +23,31 @@ ui/streamlit_dashboard.py     ← Streamlit UI (separate process)
 agent_daemon.py               ← Standalone daemon (systemd / shell scripts)
 src/agent/
     __init__.py               ← Public API: start/stop/status
-    langgraph_trading_agent.py ← LangGraph ReAct agent + all 16 tools
+    langgraph_trading_agent.py ← LangGraph ReAct agent + all 30 tools + system prompt
     state.py                  ← State schema, load/save, metrics
     agent_chat.py             ← Chat interface for conversing with agents
-    multi_agent_manager.py    ← Parallel Claude+Gemini training
+    multi_agent_manager.py    ← Parallel Claude+Gemini execution
     wallet_sync.py            ← Wallet reconciliation / external cash flows
 src/data/
     dexscreener.py            ← Token discovery + market data
     rugcheck_client.py        ← Safety analysis + bulk/insider/votes APIs
-    social_intelligence.py   ← TweetScout social data
+    social_intelligence.py    ← Social data (DexScreener social + Nansen)
+    nansen_client.py          ← Nansen smart money intelligence
     jupiter.py                ← DEX swap quotes + execution
     sol_price.py              ← CoinGecko SOL/USD price feed (60s cache)
+    unified_enrichment.py     ← Aggregates RugCheck + Social + DexScreener into one payload
+src/backtesting/
+    engine.py                 ← BacktestResult, detect_market_regime(), run_multi_timeframe_backtests()
+    strategies.py             ← 24 strategies (momentum×5, reversal×5, quick_flip×4, safety_first×3,
+                                 breakout×3, hybrid×4) via factory functions
+    runner.py                 ← run_parallel_backtests() with ThreadPoolExecutor
+    __init__.py               ← Public exports
 src/memory/
     astra_vector_store.py     ← AstraDB vector store (VoyageAI voyage-4 embeddings)
 src/blockchain/
-    solana_client.py          ← Solana RPC + wallet + transaction signing
+    solana_client.py          ← Solana RPC + wallet + transaction signing + devnet support
 src/auth/
-    enterprise_auth.py        ← bcrypt auth + PostgreSQL rate limiting (SQLite removed)
+    enterprise_auth.py        ← bcrypt auth + PostgreSQL rate limiting
 src/db/
     __init__.py               ← init_db() — call once at startup
     connection.py             ← ThreadedConnectionPool; prefers DATABASE_URL_INTERNAL
@@ -48,6 +56,7 @@ src/db/
     log_handler.py            ← PostgreSQLLogHandler — non-blocking queue-based
     trade_store.py            ← write ops: sessions, cycles, trades, positions, snapshots
     query_store.py            ← read ops: analytics queries backing the 6 DB tools
+    backtest_store.py         ← save_backtest_result(), get_strategy_performance_by_regime()
 ```
 
 ## Default Models
@@ -63,6 +72,33 @@ src/db/
 3. **Atomic state writes** — `save_agent_state()` writes to `.tmp` then `os.replace()`. Never write directly.
 4. **Tool output truncated at 4,000 chars** — prevents context window overflow in LangGraph cycles.
 5. **No VPN enforcement** — VPN feature removed entirely. Do not add it back.
+6. **No synthetic data** — no fake balances, no fabricated prices, no deprecated stubs anywhere. Dry-run reads real wallet + real Jupiter quotes; only final blockchain submission is withheld.
+7. **SystemMessage preserved across tool calls** — `_call_model` separates system_msgs from other_msgs and keeps system_msgs outside the rolling truncation window (`system_msgs + other_msgs[-12:]`).
+
+## Agent System Prompt Architecture
+
+Each trading cycle injects two messages into the LangGraph graph:
+
+1. **`SystemMessage`** from `_build_system_prompt(state)` — ~9,820-char operating manual covering:
+   - 7-step decision loop (discover → analyse → backtest → score → execute → learn → report)
+   - 5-signal scoring (100 pts): Viral Narrative 30 + Social Momentum 25 + Volume Velocity 25 + Safety Floor 10 + Marketing Firepower 10
+   - Position sizing scaled to current wallet balance (25%/20%/15%/10% tiers)
+   - Hard risk rules: -20% stop loss, 12h time stop, profit ladders (+5x/+15x/+50x)
+   - All 24 strategies with regime guidance (bull/bear/sideways/volatile)
+   - Human approval gate (≥5 SOL threshold)
+   - Complete reference for all 30 tools
+
+2. **`HumanMessage`** from `_create_context_message()` — per-cycle briefing with live wallet balance, open positions, recent trades, market regime
+
+## Backtesting System
+
+- **24 strategies** registered in `src/backtesting/strategies.py` via factory functions
+- **3 timeframes** per token: 5m, 15m, 60m (via `run_multi_timeframe_backtests()`)
+- **Market regime detection**: `detect_market_regime(candles)` → bull/bear/sideways/volatile
+- **Universe sweep**: background thread fetches top-200 Solana tokens hourly, queues for 30-day/3-timeframe deep backtests
+- **AstraDB storage**: every result tagged with `market_regime` + `interval_minutes` for regime-filtered retrieval
+- **Agent tools**: `run_deep_backtest_tool` (72 simulations per token), `get_strategy_by_regime_tool` (DB query)
+- **Queue format**: `(token_address: str, days_back: int, timeframes: list[int])`
 
 ## Render Deployment
 
@@ -77,93 +113,63 @@ src/db/
 - Local dev: DB gracefully disabled (all `src/db/` functions guard with `if not is_available(): return`).
 - **psycopg2 note**: local venv uses source-built `psycopg2` (avoids bundled OpenSSL 1.1 bug);
   `requirements.txt` uses `psycopg2-binary` for Render build servers.
+- **Render API key**: `rnd_DQdqlYHiyF7nxSvwFwy8hlbou9q0` (for programmatic env var updates)
 
-## Known Pending User Actions
+## Render Environment Variables (Key ones)
+
+| Variable | Value | Notes |
+|----------|-------|-------|
+| `MAX_POSITION_SIZE_SOL` | `1.0` | Updated from 0.1 |
+| `HUMAN_APPROVAL_THRESHOLD_SOL` | `5.0` | Trades ≥ this need human sign-off |
+| `HUMAN_APPROVAL_TIMEOUT_MINUTES` | `60` | Auto-reject after timeout |
+| `NANSEN_API_KEY` | set | Smart money intelligence |
+| `SANDBOX_INITIAL_BALANCE_SOL` | removed | Synthetic data removed |
+
+## Known Pending Items (Optional Enhancements)
 
 | Item | What's needed |
 |------|--------------|
-| TweetScout replacement | Decide on a replacement social data source (TweetScout deprecated; DexScreener social active) |
-| LangSmith feedback loop | Attach P&L outcome feedback to LangSmith traces when positions close (optional enhancement) |
-| Human-in-the-loop | Pause graph for trades above configurable SOL threshold (optional enhancement) |
-
-## What Was Completed (Session 3 — 2026-03-22)
-
-### PostgreSQL Integration
-- `src/db/` package created (7 files): ThreadedConnectionPool, 13-table schema, auth_store, non-blocking log handler, trade_store (write), query_store (analytics reads)
-- `enterprise_auth.py` migrated from SQLite → PostgreSQL (`auth_store`)
-- `agent_daemon.py`: `init_db()` at startup, `PostgreSQLLogHandler` attached, per-session/cycle DB tracking
-- `state.py`: `save_agent_state()` also snapshots to DB after every file write
-- `langgraph_trading_agent.py`: 6 new `@tool` DB query functions added to agent tool belt:
-  `query_trade_history_db_tool`, `get_performance_analytics_db_tool`, `compare_model_performance_db_tool`, `get_session_history_db_tool`, `search_system_logs_db_tool`, `get_top_tokens_db_tool`
-
-### Render Deployment
-- `render.yaml` Blueprint: daemon (Background Worker) + dashboard (Web Service)
-- `.python-version`: `3.12.0`
-- Both services deployed and live (commits `f03ae42`, `20181b2`)
-- Dashboard: https://lambda-trading-bot-dashboard.onrender.com
-
-### Infrastructure
-- GitHub: project pushed at `hthuku95/lambda-trading-bot`
-- `psycopg2` (source build) in local venv; `psycopg2-binary` in `requirements.txt` for Render
+| LangSmith feedback loop | Attach P&L outcome feedback to LangSmith traces when positions close |
 
 ---
 
-## What Was Completed (Sessions 1 + 2 — 2026-03-21)
+## Completed Work Log
 
-### Bugs Fixed
-- BUG-1: `CompleteLangGraphTradingAgent` now imported in `__init__.py`
-- BUG-2: Jupiter `get_quote()` now uses keyword args (mints were swapped)
-- BUG-4: Duplicate `market_conditions` key in serializable state
-- BUG-5: `del migrated_pos["bitquery_enriched"]` fixed → `.pop(..., None)`
-- BUG-6: `check_system_status_tool` now passes `model_provider` to `get_stats()`
-- BUG-8/10: All relative file paths → absolute paths (state.py, file_lock.py)
-- BUG-9: `_agent_running = True` now set before thread starts
+### Sessions 1 + 2 — 2026-03-21 (Foundation)
 
-### Security
-- Removed all `print()` debug statements from auth (were printing plaintext passwords)
-- Removed expected username from failed-login UI expander
-- Removed password length from audit log
-- bcrypt password hashing implemented (plaintext fallback with migration warning)
-- SQLite-backed rate limiting (survives Streamlit restarts)
-- Position size cap: `MAX_POSITION_SIZE_SOL` env var (default 0.5 SOL)
-- Slippage cap: 500 bps max in `get_swap_quote_tool`
-- VPN enforcement completely removed
+- LangGraph ReAct dual-agent (Claude Haiku + Gemini) with 16 tools
+- 10 production bugs fixed (imports, Jupiter mint swap, state paths, agent start)
+- Security: bcrypt, rate limiting, position/slippage caps, removed plaintext debug prints
+- Jupiter: dynamic decimals, `dynamicComputeUnitLimit`, priority fee `"auto"`, `restrictIntermediateTokens`
+- LangGraph: persistent `thread_id`, LangSmith tracing, SqliteSaver checkpoints, 4,000-char tool truncation
+- RugCheck: bulk, insider graph, community votes, JWT auth
+- DexScreener: takeovers, promotions, 5m buyers/sellers, 6h volume
+- AstraDB: VoyageAI voyage-4 (1024-dim), retry backoff, idempotent create, `$vector` excluded from results
+- SOL/USD price feed, USD portfolio values, Sharpe ratio, max drawdown
+- Atomic state writes, SIGHUP handler in daemon
 
-### Jupiter / Blockchain
-- Fixed decimal handling to use `inputDecimals`/`outputDecimals` from API response
-- `dynamicComputeUnitLimit: true` in swap payload
-- Priority fee changed to `"auto"`
-- `restrictIntermediateTokens: true` added to quote requests
-- Pinned: `solana>=0.30.2`, `solders>=0.21.0`, `astrapy>=2.0.0`
+### Session 3 — 2026-03-22 (PostgreSQL + Render)
 
-### LangGraph / LangSmith
-- Persistent `thread_id` per model+mode (not time-based)
-- Per-cycle metadata in config: model, mode, cycle#, balance, positions
-- Tool output truncated at 4,000 chars per message
-- `get_agent_instance()` added (was missing, referenced by agent_chat.py)
-- LangSmith: `LANGCHAIN_API_KEY` filled in `.env`, tracing active
-- **SqliteSaver**: `langgraph-checkpoint-sqlite==2.0.11` installed; agent now uses `SqliteSaver` (persistent DB at `langgraph_checkpoints.db`) with `MemorySaver` as fallback
+- `src/db/` package (7 files): 13-table schema, ThreadedConnectionPool, non-blocking log handler
+- `enterprise_auth.py` migrated SQLite → PostgreSQL
+- 6 new DB query tools in agent tool belt
+- Render deployment live (daemon + dashboard + PostgreSQL)
 
-### Data Sources Expanded
-- **RugCheck**: bulk reports, insider graph, community votes, most-viewed, verified tokens, JWT auth, health check via `/ping`
-- **DexScreener**: community takeovers, promoted tokens, `buyers_5m`/`sellers_5m`, `volume_6h`, `liquidity_base`/`liquidity_quote`
+### Sessions 4–5 — 2026-03-24 (Production Hardening)
 
-### Memory
-- VoyageAI upgraded: `voyage-3.5` → `voyage-4` with `output_dimension=1024`
-- `search_similar_experiences()` uses `input_type="query"` (was always "document")
-- AstraDB connectivity health check on startup with clear error message
-
-### Features Completed
-- SOL/USD price feed via CoinGecko free API (`src/data/sol_price.py`) — 60s cache
-- `wallet_balance_usd`, `total_portfolio_value_usd`, `total_profit_usd` now populated
-- Sharpe ratio (annualised) implemented in `update_portfolio_metrics()`
-- Max drawdown (peak-to-trough) implemented using `balance_history` rolling window
-- `data_sources_attempted` / `data_sources_successful` now populated in `social_intelligence.py`
-- Agent chat system prompt is capital-flexible (scales to any balance, no hardcoded $ amounts)
-- Atomic state file writes (`os.replace`)
-- Streamlit auto-refresh uses `<meta http-equiv='refresh'>` (not `time.sleep(30)`)
-- Legacy `pure_ai_agent.py` and `pure_ai_graph.py` deleted
-- `agent_daemon.py` now handles SIGHUP for config reload without restart
-- **Sandbox/dry-run virtual wallet**: `simulated_balance_sol` in state; dry-run cycles use a virtual 10 SOL balance (configurable via `SANDBOX_INITIAL_BALANCE_SOL` in `.env`); `get_wallet_balance_tool` returns simulated balance in dry-run; `execute_trade_tool` debits/credits `_current_simulated_balance`; balance persists across cycles in `agent_state.json`
-- **TweetScout deprecated**: `social_intelligence.py` returns DexScreener social only; TweetScout fields return stubs (`{"status": "deprecated", ...}`)
-- **AstraDB**: New database `lambda-trading-bot` (`6d689661-...`); org-level token in `.env`; time-based 60s retry backoff; `$vector` excluded from search results; idempotent `create_collection()` (no `list_collection_names()`); 3-attempt insert retry with exponential backoff
+- **Real-data-only mandate**: removed all synthetic data (`simulated_balance_sol`, `_current_simulated_balance`, `SANDBOX_INITIAL_BALANCE_SOL`); dry-run now uses real wallet balance + real Jupiter quotes
+- **TweetScout fully removed**: stubs deleted; replaced with Nansen + DexScreener social
+- **`src/data/nansen_client.py`**: Nansen smart money API integration
+- **341-test suite** across all modules; `pytest.ini` with `integration` and `devnet` markers
+- **`src/backtesting/`**: engine, 24 strategies (via factory functions), parallel runner, AstraDB storage, `src/db/backtest_store.py`
+- **Universe sweep** in `agent_daemon.py`: top-200 tokens hourly, 30-day/3-TF queue
+- **Market regime detection**: `detect_market_regime()` tags all backtest results bull/bear/sideways/volatile
+- **Human-in-the-loop**: `ui/components/approvals.py`, approval queue in daemon, dashboard notification
+- **Perfect system prompts**: `_build_system_prompt()` 9,820-char operating manual + `_create_context_message()` per-cycle briefing; SystemMessage preserved across tool call truncation
+- **`agent_chat.py`** system prompt rewritten with full 24-strategy reference, Nansen mentions, live portfolio state
+- **All UI components** updated: TweetScout → Social Intelligence (Nansen + DexScreener) across 12 files
+- **`render.yaml`** updated: `MAX_POSITION_SIZE_SOL` 0.1→1.0, `HUMAN_APPROVAL_THRESHOLD_SOL=5.0` added
+- **Render env vars** set via API: `NANSEN_API_KEY`, approval thresholds, removed `SANDBOX_INITIAL_BALANCE_SOL`
+- **`src/blockchain/solana_client.py`**: devnet support (`get_devnet_rpc_client()`, `send_devnet_transaction()`)
+- **`.gitignore`**: added SQLite WAL files (`langgraph_checkpoints.db-shm`, `-wal`)
+- **`src/db/backtest_store.py`**: `get_strategy_performance_by_regime()` query on PostgreSQL JSON path
